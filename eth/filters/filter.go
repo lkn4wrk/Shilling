@@ -156,6 +156,23 @@ func (f *Filter) Logs(ctx context.Context) ([]*types.Log, error) {
 		logs []*types.Log
 		err  error
 	)
+	// get all logs
+	if (f.addresses == nil || len(f.addresses) == 0) && (f.topics == nil || len(f.topics) == 0) {
+		for ; f.begin <= int64(end); f.begin++ {
+			header, err := f.backend.HeaderByNumber(ctx, rpc.BlockNumber(f.begin))
+			if header == nil || err != nil {
+				return logs, err
+			}
+			lls, err := f.backend.GetLogs(ctx, header.Hash())
+			if err != nil {
+				return nil, err
+			}
+			for _, ls := range lls {
+				logs = append(logs, ls...)
+			}
+		}
+		return logs, err
+	}
 	size, sections := f.backend.BloomStatus()
 	if indexed := sections * size; indexed > uint64(f.begin) {
 		if indexed > end {
