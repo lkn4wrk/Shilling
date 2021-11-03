@@ -5,7 +5,9 @@ package types
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 	"math/big"
+	"math/bits"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -147,4 +149,16 @@ func bloomBigValues(data []byte, hashbuf []byte) (uint, byte, uint, byte, uint, 
 // BloomBigLookup is a convenience-method to check presence int he bloom filter
 func BloomBigLookup(bin BloomBig, topic bytesBacked) bool {
 	return bin.Test(topic.Bytes())
+}
+
+func (b *BloomBig) OnesCount() (count int) {
+	for _, v := range b {
+		count += bits.OnesCount8(v)
+	}
+	return count
+}
+
+func (b *BloomBig) Rate() float64 {
+	bits := b.OnesCount()
+	return math.Pow(float64(bits)/BloomBigBitLength, 3)
 }
