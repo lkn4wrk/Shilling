@@ -46,6 +46,29 @@ func (b *BloomBig) Add(d []byte) {
 	b.add(d, make([]byte, 12))
 }
 
+// require len(item) >= 2+32+32
+// require len(buf) >= 12
+func (b *BloomBig) AddLog(log *Log, item []byte, buf []byte) error {
+	n := byte(len(log.Topics))
+	if n == 0 {
+		return nil // ignore log with no topic
+	}
+
+	item[0] = n
+	copy(item[1:], log.Topics[0].Bytes())
+
+	for i := byte(1); i < n; i++ {
+		// n + topic[0] + i + topic[i]
+		item[32] = i
+		copy(item[33:], log.Topics[i].Bytes())
+		b.Add(item)
+	}
+	// n + topic[0] + address
+	copy(item[32:], log.Address.Bytes())
+	b.add(item[:1+32+20], buf)
+	return nil
+}
+
 // add is internal version of Add, which takes a scratch buffer for reuse (needs to be at least 12 bytes)
 func (b *BloomBig) add(d []byte, buf []byte) {
 	i1, v1, i2, v2, i3, v3 := bloomBigValues(d, buf)
@@ -82,34 +105,6 @@ func (b BloomBig) MarshalText() ([]byte, error) {
 // UnmarshalText b as a hex string with 0x prefix.
 func (b *BloomBig) UnmarshalText(input []byte) error {
 	return hexutil.UnmarshalFixedText("BloomBig", input, b[:])
-}
-
-// CreateBloomBig creates a bloom filter out of the give Receipts (+Logs)
-func CreateBloomBig(receipts Receipts) BloomBig {
-	buf := make([]byte, 12)
-	var bin BloomBig
-	for _, receipt := range receipts {
-		for _, log := range receipt.Logs {
-			bin.add(log.Address.Bytes(), buf)
-			for _, b := range log.Topics {
-				bin.add(b[:], buf)
-			}
-		}
-	}
-	return bin
-}
-
-// LogsBloomBig returns the bloom bytes for the given logs
-func LogsBloomBig(logs []*Log) []byte {
-	buf := make([]byte, 12)
-	var bin BloomBig
-	for _, log := range logs {
-		bin.add(log.Address.Bytes(), buf)
-		for _, b := range log.Topics {
-			bin.add(b[:], buf)
-		}
-	}
-	return bin[:]
 }
 
 // BloomBigBytes returns the bloom filter for the given data
