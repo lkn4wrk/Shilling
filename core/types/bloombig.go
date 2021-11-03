@@ -49,6 +49,9 @@ func (b *BloomBig) Add(d []byte) {
 // require len(item) >= 2+32+32
 // require len(buf) >= 12
 func (b *BloomBig) AddLog(log *Log, item []byte, buf []byte) error {
+	if log.Removed {
+		return nil // ignore removed log
+	}
 	n := byte(len(log.Topics))
 	if n == 0 {
 		return nil // ignore log with no topic
