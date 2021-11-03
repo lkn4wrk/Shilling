@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
@@ -28,7 +29,13 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/event"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rpc"
+
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 const maxFilterBlockRange = 5000
@@ -120,6 +127,102 @@ func newFilter(backend Backend, addresses []common.Address, topics [][]common.Ha
 	}
 }
 
+var indexingEpoch uint32
+
+func (f *Filter) indexEpoch(ctx context.Context, begin uint64, head uint64) error {
+	const CANON_DEPTH = 512
+	const EPOCH = 4096
+
+	epoch := begin / EPOCH
+	begin = epoch * EPOCH
+	end := begin + EPOCH - 1
+	if end+CANON_DEPTH > head {
+		return fmt.Errorf("incompleted epoch: %v", epoch)
+	}
+
+	if !atomic.CompareAndSwapUint32(&indexingEpoch, 0, 1) {
+		return fmt.Errorf("another epoch is being indexed")
+	}
+
+	go func() error {
+		defer func() {
+			atomic.StoreUint32(&indexingEpoch, 0)
+		}()
+
+		client, err := mongo.Connect(context.TODO(), options.Client().ApplyURI("mongodb://127.0.0.1:27017"))
+		if err != nil {
+			log.Error("MongoDB connect", err)
+			return err
+		}
+		defer func() {
+			if err = client.Disconnect(context.TODO()); err != nil {
+				log.Error("MongoDB disconnect", err)
+			}
+		}()
+
+		log.Info("Start indexing big bloom", "epoch", epoch, "begin", begin, "end", end)
+
+		collection := client.Database("bloom").Collection("bloom")
+
+		result := struct {
+			bits []byte
+		}{}
+		collection.FindOne(context.TODO(), bson.D{primitive.E{Key: "epoch", Value: epoch}}).Decode(&result)
+
+		epochBloom := types.BytesToBloomBig(result.bits)
+		item := make([]byte, 2+32+32)
+
+		for blockNumber := begin; blockNumber <= end; blockNumber++ {
+			header, err := f.backend.HeaderByNumber(ctx, rpc.BlockNumber(blockNumber))
+			if header == nil || err != nil {
+				return err
+			}
+			lls, err := f.backend.GetLogs(ctx, header.Hash())
+
+			if err != nil {
+				return err
+			}
+
+			for _, ls := range lls {
+				for _, log := range ls {
+					n := byte(len(log.Topics))
+					if n == 0 {
+						continue
+					}
+
+					item[0] = n
+					copy(item[1:], log.Topics[0].Bytes())
+
+					for i := byte(1); i < n; i++ {
+						// n + topic[0] + i + topic[i]
+						item[32] = i
+						copy(item[33:], log.Topics[i].Bytes())
+						epochBloom.Add(item)
+					}
+					// n + topic[0] + address
+					copy(item[32:], log.Address.Bytes())
+					epochBloom.Add(item[:1+32+20])
+				}
+			}
+		}
+
+		res, err := collection.UpdateOne(context.TODO(),
+			bson.D{primitive.E{Key: "epoch", Value: epoch}},
+			bson.D{primitive.E{Key: "$set", Value: primitive.E{Key: "bits", Value: epochBloom.Bytes()}}},
+			options.Update().SetUpsert(true),
+		)
+		if err != nil {
+			log.Error("Failed to update the epoch bloom bits", "err", err)
+			return err
+		}
+
+		log.Info("Finished indexing big bloom", "result", res)
+		return err
+	}()
+
+	return nil
+}
+
 // Logs searches the blockchain for matching log entries, returning all from the
 // first block that contains matches, updating the start of the filter accordingly.
 func (f *Filter) Logs(ctx context.Context) ([]*types.Log, error) {
@@ -158,20 +261,11 @@ func (f *Filter) Logs(ctx context.Context) ([]*types.Log, error) {
 	)
 	// get all logs
 	if (f.addresses == nil || len(f.addresses) == 0) && (f.topics == nil || len(f.topics) == 0) {
-		for ; f.begin <= int64(end); f.begin++ {
-			header, err := f.backend.HeaderByNumber(ctx, rpc.BlockNumber(f.begin))
-			if header == nil || err != nil {
-				return logs, err
-			}
-			lls, err := f.backend.GetLogs(ctx, header.Hash())
-			if err != nil {
-				return nil, err
-			}
-			for _, ls := range lls {
-				logs = append(logs, ls...)
-			}
+		err = f.indexEpoch(ctx, uint64(f.begin), head)
+		if err != nil {
+			return nil, err
 		}
-		return logs, err
+		return logs, nil
 	}
 	size, sections := f.backend.BloomStatus()
 	if indexed := sections * size; indexed > uint64(f.begin) {
