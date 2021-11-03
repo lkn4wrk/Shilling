@@ -131,23 +131,14 @@ const EPOCH = 4096
 
 var indexingEpoch uint32
 
-func splitEpochs(begin uint64, end uint64) (epochs [][2]uint64) {
-	n := end/EPOCH - begin/EPOCH + 1
-	epochs = make([][2]uint64, n)
-	start := begin - begin%EPOCH
-	for i := uint64(0); i < n; i++ {
-		epochs[i] = [2]uint64{
-			start + EPOCH*i,
-			start + EPOCH*(i+1) - 1,
-		}
+func pickEpoch(begin uint64, end uint64) (newEnd uint64, from uint64, to uint64) {
+	to = end
+	from = (end - 1) / EPOCH * EPOCH
+	if begin > from {
+		from = begin
 	}
-	if begin > epochs[0][0] {
-		epochs[0][0] = begin
-	}
-	if end < epochs[n-1][1] {
-		epochs[n-1][1] = end
-	}
-	return epochs
+	newEnd = from
+	return newEnd, from, to
 }
 
 func (f *Filter) startEpochIndexing(ctx context.Context, begin uint64, end uint64) error {
@@ -178,26 +169,30 @@ func (f *Filter) startEpochIndexing(ctx context.Context, begin uint64, end uint6
 		item := make([]byte, 2+32+32)
 		buf := make([]byte, 12)
 
-		epochs := splitEpochs(begin, end)
-		for _, r := range epochs {
-			from, to := r[0], r[1]
+		var from, to uint64
+		for end, from, to = pickEpoch(begin, end); from < to; end, from, to = pickEpoch(begin, end) {
 			epoch := from / EPOCH
 			log.Info("EPOCH: start indexing", "epoch", epoch, "from", from, "to", to)
 
 			var epochBloom types.BloomBig
-			if from%EPOCH != 0 || (to+1)%EPOCH != 0 {
+			if from%EPOCH != 0 || to%EPOCH != 0 {
 				// incompleted epoch, load the current bloom from the db
 				result := struct{ bits []byte }{}
 				err := collection.FindOne(context.TODO(), bson.D{primitive.E{Key: "epoch", Value: epoch}}).Decode(&result)
 				if err != nil {
-					log.Error("EPOCH: MongoDB FindOne", "err", err)
-					return err
+					// ErrNoDocuments means that the filter did not match any documents in the collection.
+					if err != mongo.ErrNoDocuments {
+						log.Error("EPOCH: MongoDB FindOne", "err", err)
+						return err
+					}
+					log.Info("EPOCH: bloombits not exist, start a clean one")
+				} else {
+					epochBloom.SetBytes(result.bits)
+					log.Info("EPOCH: existing bloombits loaded")
 				}
-				epochBloom.SetBytes(result.bits)
-				log.Info("EPOCH: existing bloombits loaded", "epoch", epoch)
 			}
 
-			for blockNumber := from; blockNumber <= to; blockNumber++ {
+			for blockNumber := from; blockNumber < to; blockNumber++ {
 				header, err := f.backend.HeaderByNumber(ctx, rpc.BlockNumber(blockNumber))
 				if header == nil || err != nil {
 					log.Error("EPOCH: missing header", "err", err)
@@ -271,7 +266,7 @@ func (f *Filter) Logs(ctx context.Context) ([]*types.Log, error) {
 
 	// get all logs
 	if (f.addresses == nil || len(f.addresses) == 0) && (f.topics == nil || len(f.topics) == 0) {
-		err = f.startEpochIndexing(ctx, uint64(f.begin), end)
+		err = f.startEpochIndexing(ctx, uint64(f.begin), end+1)
 		if err != nil {
 			return nil, err
 		}
