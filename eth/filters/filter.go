@@ -175,10 +175,11 @@ func (f *Filter) startEpochIndexing(ctx context.Context, begin uint64, end uint6
 			log.Info("EPOCH: start indexing", "epoch", epoch, "from", from, "to", to)
 
 			var epochBloom types.BloomBig
+			result := struct{ bits []byte }{}
+			err := collection.FindOne(context.TODO(), bson.D{primitive.E{Key: "epoch", Value: epoch}}).Decode(&result)
+
 			if from%EPOCH != 0 || to%EPOCH != 0 {
 				// incompleted epoch, load the current bloom from the db
-				result := struct{ bits []byte }{}
-				err := collection.FindOne(context.TODO(), bson.D{primitive.E{Key: "epoch", Value: epoch}}).Decode(&result)
 				if err != nil {
 					// ErrNoDocuments means that the filter did not match any documents in the collection.
 					if err != mongo.ErrNoDocuments {
@@ -189,6 +190,11 @@ func (f *Filter) startEpochIndexing(ctx context.Context, begin uint64, end uint6
 				} else {
 					epochBloom.SetBytes(result.bits)
 					log.Info("EPOCH: existing bloombits loaded")
+				}
+			} else {
+				if err == nil {
+					log.Info("EPOCH: bloombits exists, SKIP!")
+					continue // skip the full epoch that already exist in db
 				}
 			}
 
@@ -221,7 +227,7 @@ func (f *Filter) startEpochIndexing(ctx context.Context, begin uint64, end uint6
 				log.Error("EPOCH: failed to update the bloom bits", "err", err)
 				return err
 			}
-			log.Info("EPOCH: finished indexing", "epoch", epoch, "result", res)
+			log.Info("EPOCH: finished indexing", "epoch", epoch, "rate", epochBloom.Rate(), "result", res)
 		}
 
 		return err
