@@ -171,6 +171,7 @@ func (f *Filter) indexEpoch(ctx context.Context, begin uint64, head uint64) erro
 
 		epochBloom := types.BytesToBloomBig(result.bits)
 		item := make([]byte, 2+32+32)
+		buf := make([]byte, 12)
 
 		for blockNumber := begin; blockNumber <= end; blockNumber++ {
 			header, err := f.backend.HeaderByNumber(ctx, rpc.BlockNumber(blockNumber))
@@ -185,23 +186,7 @@ func (f *Filter) indexEpoch(ctx context.Context, begin uint64, head uint64) erro
 
 			for _, ls := range lls {
 				for _, log := range ls {
-					n := byte(len(log.Topics))
-					if n == 0 {
-						continue
-					}
-
-					item[0] = n
-					copy(item[1:], log.Topics[0].Bytes())
-
-					for i := byte(1); i < n; i++ {
-						// n + topic[0] + i + topic[i]
-						item[32] = i
-						copy(item[33:], log.Topics[i].Bytes())
-						epochBloom.Add(item)
-					}
-					// n + topic[0] + address
-					copy(item[32:], log.Address.Bytes())
-					epochBloom.Add(item[:1+32+20])
+					epochBloom.AddLog(log, item, buf)
 				}
 			}
 		}
