@@ -127,21 +127,32 @@ func newFilter(backend Backend, addresses []common.Address, topics [][]common.Ha
 	}
 }
 
+const EPOCH = 4096
+
 var indexingEpoch uint32
 
-func (f *Filter) indexEpoch(ctx context.Context, begin uint64, head uint64) error {
-	const CANON_DEPTH = 512
-	const EPOCH = 4096
-
-	epoch := begin / EPOCH
-	begin = epoch * EPOCH
-	end := begin + EPOCH - 1
-	if end+CANON_DEPTH > head {
-		return fmt.Errorf("incompleted epoch: %v", epoch)
+func splitEpochs(begin uint64, end uint64) (epochs [][2]uint64) {
+	n := end/EPOCH - begin/EPOCH + 1
+	epochs = make([][2]uint64, n)
+	start := begin - begin%EPOCH
+	for i := uint64(0); i < n; i++ {
+		epochs[i] = [2]uint64{
+			start + EPOCH*i,
+			start + EPOCH*(i+1) - 1,
+		}
 	}
+	if begin > epochs[0][0] {
+		epochs[0][0] = begin
+	}
+	if end < epochs[n-1][1] {
+		epochs[n-1][1] = end
+	}
+	return epochs
+}
 
+func (f *Filter) startEpochIndexing(ctx context.Context, begin uint64, end uint64) error {
 	if !atomic.CompareAndSwapUint32(&indexingEpoch, 0, 1) {
-		return fmt.Errorf("another epoch is being indexed")
+		return fmt.Errorf("EPOCH: being indexed")
 	}
 
 	go func() error {
@@ -149,59 +160,75 @@ func (f *Filter) indexEpoch(ctx context.Context, begin uint64, head uint64) erro
 			atomic.StoreUint32(&indexingEpoch, 0)
 		}()
 
+		log.Info("EPOCH: start indexing sequence", "begin", begin, "end", end)
+
 		client, err := mongo.Connect(context.TODO(), options.Client().ApplyURI("mongodb://127.0.0.1:27017"))
 		if err != nil {
-			log.Error("MongoDB connect", err)
+			log.Error("EPOCH: MongoDB connect", err)
 			return err
 		}
 		defer func() {
 			if err = client.Disconnect(context.TODO()); err != nil {
-				log.Error("MongoDB disconnect", err)
+				log.Error("EPOCH: MongoDB disconnect", err)
 			}
 		}()
-
-		log.Info("Start indexing big bloom", "epoch", epoch, "begin", begin, "end", end)
-
 		collection := client.Database("bloom").Collection("bloom")
 
-		result := struct {
-			bits []byte
-		}{}
-		collection.FindOne(context.TODO(), bson.D{primitive.E{Key: "epoch", Value: epoch}}).Decode(&result)
-
-		epochBloom := types.BytesToBloomBig(result.bits)
+		// scratch buffers
 		item := make([]byte, 2+32+32)
 		buf := make([]byte, 12)
 
-		for blockNumber := begin; blockNumber <= end; blockNumber++ {
-			header, err := f.backend.HeaderByNumber(ctx, rpc.BlockNumber(blockNumber))
-			if header == nil || err != nil {
-				return err
-			}
-			lls, err := f.backend.GetLogs(ctx, header.Hash())
+		epochs := splitEpochs(begin, end)
+		for _, r := range epochs {
+			from, to := r[0], r[1]
+			epoch := from / EPOCH
+			log.Info("EPOCH: start indexing", "epoch", epoch, "from", from, "to", to)
 
-			if err != nil {
-				return err
+			var epochBloom types.BloomBig
+			if from%EPOCH != 0 || (to+1)%EPOCH != 0 {
+				// incompleted epoch, load the current bloom from the db
+				result := struct{ bits []byte }{}
+				err := collection.FindOne(context.TODO(), bson.D{primitive.E{Key: "epoch", Value: epoch}}).Decode(&result)
+				if err != nil {
+					log.Error("EPOCH: MongoDB FindOne", "err", err)
+					return err
+				}
+				epochBloom.SetBytes(result.bits)
+				log.Info("EPOCH: existing bloombits loaded", "epoch", epoch)
 			}
 
-			for _, ls := range lls {
-				for _, log := range ls {
-					epochBloom.AddLog(log, item, buf)
+			for blockNumber := from; blockNumber <= to; blockNumber++ {
+				header, err := f.backend.HeaderByNumber(ctx, rpc.BlockNumber(blockNumber))
+				if header == nil || err != nil {
+					log.Error("EPOCH: missing header", "err", err)
+					return err
+				}
+
+				lls, err := f.backend.GetLogs(ctx, header.Hash())
+				if err != nil {
+					log.Error("EPOCH: GetLogs failed", "err", err)
+					return err
+				}
+
+				for _, ls := range lls {
+					for _, log := range ls {
+						epochBloom.AddLog(log, item, buf)
+					}
 				}
 			}
+
+			res, err := collection.UpdateOne(context.TODO(),
+				bson.D{primitive.E{Key: "epoch", Value: epoch}},
+				bson.D{primitive.E{Key: "$set", Value: primitive.E{Key: "bits", Value: epochBloom.Bytes()}}},
+				options.Update().SetUpsert(true),
+			)
+			if err != nil {
+				log.Error("EPOCH: failed to update the bloom bits", "err", err)
+				return err
+			}
+			log.Info("EPOCH: finished indexing", "epoch", epoch, "result", res)
 		}
 
-		res, err := collection.UpdateOne(context.TODO(),
-			bson.D{primitive.E{Key: "epoch", Value: epoch}},
-			bson.D{primitive.E{Key: "$set", Value: primitive.E{Key: "bits", Value: epochBloom.Bytes()}}},
-			options.Update().SetUpsert(true),
-		)
-		if err != nil {
-			log.Error("Failed to update the epoch bloom bits", "err", err)
-			return err
-		}
-
-		log.Info("Finished indexing big bloom", "result", res)
 		return err
 	}()
 
@@ -236,22 +263,25 @@ func (f *Filter) Logs(ctx context.Context) ([]*types.Log, error) {
 	if f.end == -1 {
 		end = head
 	}
-	if f.rangeLimit && (int64(end)-f.begin) > maxFilterBlockRange {
-		return nil, fmt.Errorf("exceed maximum block range: %d", maxFilterBlockRange)
-	}
 	// Gather all indexed logs, and finish with non indexed ones
 	var (
 		logs []*types.Log
 		err  error
 	)
+
 	// get all logs
 	if (f.addresses == nil || len(f.addresses) == 0) && (f.topics == nil || len(f.topics) == 0) {
-		err = f.indexEpoch(ctx, uint64(f.begin), head)
+		err = f.startEpochIndexing(ctx, uint64(f.begin), end)
 		if err != nil {
 			return nil, err
 		}
 		return logs, nil
 	}
+
+	if f.rangeLimit && (int64(end)-f.begin) > maxFilterBlockRange {
+		return nil, fmt.Errorf("exceed maximum block range: %d", maxFilterBlockRange)
+	}
+
 	size, sections := f.backend.BloomStatus()
 	if indexed := sections * size; indexed > uint64(f.begin) {
 		if indexed > end {
