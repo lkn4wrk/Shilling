@@ -37,13 +37,8 @@ import (
 )
 
 const (
-	bloomEpoch          = 4096
-	canonicalEpochDepth = 1024
-	mongoURI            = "mongodb://127.0.0.1:27017"
-)
-
-var (
-	bloomAddress = common.HexToAddress("0xbBbBBBBbbBBBbbbBbbBbbbbBBbBbbbbBbBbbBBbB")
+	bloomEpoch = 4096
+	mongoURI   = "mongodb://127.0.0.1:27017"
 )
 
 // ChainIndexerBackend defines the methods needed to process chain segments in
@@ -346,7 +341,7 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 	item := make([]byte, 2+32+32)
 	buf := make([]byte, types.EpochBloomK*4)
 
-	currentEpoch := (blockchain.CurrentHeader().Number.Uint64() - canonicalEpochDepth) / bloomEpoch
+	currentEpoch := (blockchain.CurrentHeader().Number.Uint64() - c.confirmsReq) / bloomEpoch
 	for epoch := currentEpoch - 1; epoch < currentEpoch; epoch-- {
 		err := collection.FindOne(
 			context.TODO(),
