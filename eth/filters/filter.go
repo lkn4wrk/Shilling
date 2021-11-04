@@ -172,7 +172,6 @@ func (f *Filter) startEpochIndexing(ctx context.Context, begin uint64, end uint6
 		var from, to uint64
 		for end, from, to = pickEpoch(begin, end); from < to; end, from, to = pickEpoch(begin, end) {
 			epoch := from / EPOCH
-			log.Info("EPOCH: start indexing", "epoch", epoch, "from", from, "to", to)
 
 			var epochBloom types.BloomBig
 			result := struct{ bits []byte }{}
@@ -186,17 +185,19 @@ func (f *Filter) startEpochIndexing(ctx context.Context, begin uint64, end uint6
 						log.Error("EPOCH: MongoDB FindOne", "err", err)
 						return err
 					}
-					log.Info("EPOCH: bloombits not exist, start a clean one")
+					log.Info("EPOCH: bloombits not exist, start a clean one", "epoch", epoch)
 				} else {
 					epochBloom.SetBytes(result.bits)
-					log.Info("EPOCH: existing bloombits loaded")
+					log.Info("EPOCH: existing bloombits loaded", "epoch", epoch)
 				}
 			} else {
 				if err == nil {
-					log.Info("EPOCH: bloombits exists, SKIP!")
+					log.Info("EPOCH: bloombits exists, SKIP!", "epoch", epoch)
 					continue // skip the full epoch that already exist in db
 				}
 			}
+
+			log.Info("EPOCH: start indexing", "epoch", epoch, "from", from, "to", to)
 
 			for blockNumber := from; blockNumber < to; blockNumber++ {
 				header, err := f.backend.HeaderByNumber(ctx, rpc.BlockNumber(blockNumber))
