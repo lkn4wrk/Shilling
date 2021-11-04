@@ -344,7 +344,7 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 
 	// scratch buffers
 	item := make([]byte, 2+32+32)
-	buf := make([]byte, types.BloomBigK*4)
+	buf := make([]byte, types.EpochBloomK*4)
 
 	currentEpoch := (blockchain.CurrentHeader().Number.Uint64() - canonicalEpochDepth) / bloomEpoch
 	for epoch := currentEpoch - 1; epoch < currentEpoch; epoch-- {
@@ -360,7 +360,7 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 
 		log.Info("EPOCH: start indexing", "epoch", epoch)
 
-		var epochBloom types.BloomBig
+		var epochBloom types.EpochBloom
 		var count uint
 
 		for blockNumber := epoch * bloomEpoch; blockNumber < (epoch+1)*bloomEpoch; blockNumber++ {
