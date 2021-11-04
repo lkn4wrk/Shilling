@@ -153,7 +153,7 @@ func BloomBigLookup(bin BloomBig, topic bytesBacked) bool {
 	return bin.Test(topic.Bytes())
 }
 
-func (b *BloomBig) OnesCount() (count int) {
+func (b *BloomBig) Bits() (count int) {
 	for _, v := range b {
 		count += bits.OnesCount8(v)
 	}
@@ -161,6 +161,10 @@ func (b *BloomBig) OnesCount() (count int) {
 }
 
 func (b *BloomBig) Rate() float64 {
-	bits := b.OnesCount()
+	bits := b.Bits()
 	return math.Pow(float64(bits)/BloomBigBitLength, BloomBigK)
+}
+
+func (b *BloomBig) Size() uint {
+	return uint(-BloomBigBitLength * math.Log(1-float64(b.Bits())/BloomBigBitLength) / BloomBigK)
 }

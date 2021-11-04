@@ -30,6 +30,20 @@ import (
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
+)
+
+const (
+	bloomEpoch          = 4096
+	canonicalEpochDepth = 1024
+	mongoURI            = "mongodb://127.0.0.1:27017"
+)
+
+var (
+	bloomAddress = common.HexToAddress("0xbBbBBBBbbBBBbbbBbbBbbbbBBbBbbbbBbBbbBBbB")
 )
 
 // ChainIndexerBackend defines the methods needed to process chain segments in
@@ -58,6 +72,13 @@ type ChainIndexerChain interface {
 
 	// SubscribeChainHeadEvent subscribes to new head header notifications.
 	SubscribeChainHeadEvent(ch chan<- ChainHeadEvent) event.Subscription
+}
+
+type ChainIndexerFullChain interface {
+	ChainIndexerChain
+
+	GetHeaderByNumber(number uint64) *types.Header
+	GetReceiptsByHash(hash common.Hash) types.Receipts
 }
 
 // ChainIndexer does a post-processing job for equally sized sections of the
@@ -150,6 +171,7 @@ func (c *ChainIndexer) Start(chain ChainIndexerChain) {
 	sub := chain.SubscribeChainHeadEvent(events)
 
 	go c.eventLoop(chain.CurrentHeader(), events, sub)
+	go c.epochIndexLoop(chain)
 }
 
 // Close tears down all goroutines belonging to the indexer and returns any error
@@ -296,6 +318,82 @@ func (c *ChainIndexer) newHead(head uint64, reorg bool) {
 			default:
 			}
 		}
+	}
+}
+
+func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
+	blockchain, ok := chain.(ChainIndexerFullChain)
+	if !ok {
+		log.Error("EPOCH: disabled for lightchain")
+		return
+	}
+
+	log.Info("EPOCH: start indexing sequence")
+
+	client, err := mongo.Connect(context.TODO(), options.Client().ApplyURI(mongoURI))
+	if err != nil {
+		log.Error("EPOCH: MongoDB connect", err)
+		return
+	}
+	defer func() {
+		if err = client.Disconnect(context.TODO()); err != nil {
+			log.Error("EPOCH: MongoDB disconnect", err)
+		}
+	}()
+	collection := client.Database("bloom").Collection("bloom")
+
+	// scratch buffers
+	item := make([]byte, 2+32+32)
+	buf := make([]byte, types.BloomBigK*4)
+
+	currentEpoch := (blockchain.CurrentHeader().Number.Uint64() - canonicalEpochDepth) / bloomEpoch
+	for epoch := currentEpoch - 1; epoch < currentEpoch; epoch-- {
+		err := collection.FindOne(
+			context.TODO(),
+			bson.D{primitive.E{Key: "_id", Value: epoch}},
+			&options.FindOneOptions{Projection: bson.M{"_id": 0}},
+		).Decode(&bson.M{})
+		if err == nil {
+			log.Info("EPOCH: bloombits exists, SKIP!", "epoch", epoch)
+			continue // skip the full epoch that already exist in db
+		}
+
+		log.Info("EPOCH: start indexing", "epoch", epoch)
+
+		var epochBloom types.BloomBig
+		var count uint
+
+		for blockNumber := epoch * bloomEpoch; blockNumber < (epoch+1)*bloomEpoch; blockNumber++ {
+			header := blockchain.GetHeaderByNumber(blockNumber)
+			if header == nil {
+				log.Error("EPOCH: missing header", "number", blockNumber)
+				return
+			}
+
+			receipts := blockchain.GetReceiptsByHash(header.Hash())
+			if receipts == nil {
+				log.Error("EPOCH: missing block receipts", "number", blockNumber)
+				return
+			}
+
+			for _, receipt := range receipts {
+				for _, log := range receipt.Logs {
+					epochBloom.AddLog(log, item, buf)
+					count++
+				}
+			}
+		}
+
+		res, err := collection.UpdateOne(context.TODO(),
+			bson.D{primitive.E{Key: "_id", Value: epoch}},
+			bson.D{primitive.E{Key: "$set", Value: primitive.E{Key: "bits", Value: epochBloom.Bytes()}}},
+			options.Update().SetUpsert(true),
+		)
+		if err != nil {
+			log.Error("EPOCH: failed to update the bloom bits", "err", err)
+			return
+		}
+		log.Info("EPOCH: finished indexing", "epoch", epoch, "bits", epochBloom.Bits(), "rate%", epochBloom.Rate()*100, "size", epochBloom.Size(), "count", count, "result", res)
 	}
 }
 
