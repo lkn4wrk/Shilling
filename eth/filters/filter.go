@@ -175,7 +175,7 @@ func (f *Filter) startEpochIndexing(ctx context.Context, begin uint64, end uint6
 
 			var epochBloom types.BloomBig
 			result := struct{ bits []byte }{}
-			err := collection.FindOne(context.TODO(), bson.D{primitive.E{Key: "epoch", Value: epoch}}).Decode(&result)
+			err := collection.FindOne(context.TODO(), bson.D{primitive.E{Key: "_id", Value: epoch}}).Decode(&result)
 
 			if from%EPOCH != 0 || to%EPOCH != 0 {
 				// incompleted epoch, load the current bloom from the db
@@ -220,7 +220,7 @@ func (f *Filter) startEpochIndexing(ctx context.Context, begin uint64, end uint6
 			}
 
 			res, err := collection.UpdateOne(context.TODO(),
-				bson.D{primitive.E{Key: "epoch", Value: epoch}},
+				bson.D{primitive.E{Key: "_id", Value: epoch}},
 				bson.D{primitive.E{Key: "$set", Value: primitive.E{Key: "bits", Value: epochBloom.Bytes()}}},
 				options.Update().SetUpsert(true),
 			)
