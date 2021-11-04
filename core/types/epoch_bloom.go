@@ -14,46 +14,47 @@ import (
 )
 
 const (
-	BloomBigK = 8
+	// EpochBloomM represents the number of hashes used in a epoch bloom.
+	EpochBloomK = 8
 
-	// BloomBigByteLength represents the number of bytes used in a header log bloom.
-	BloomBigByteLength = 256 * 4096 * 6
+	// EpochBloomM represents the number of bits used in a epoch bloom.
+	EpochBloomM = 1024 * 1024 * 8 * 6
 
-	// BloomBigBitLength represents the number of bits used in a header log bloom.
-	BloomBigBitLength = BloomBigByteLength << 3
+	// EpochBloomByteLength represents the number of bytes used in a header log bloom.
+	EpochBloomByteLength = EpochBloomM / 8
 )
 
-var EmptyBloomBig = BloomBig{}
+var EmptyEpochBloom = EpochBloom{}
 
-// BloomBig represents a 2048 bit bloom filter.
-type BloomBig [BloomBigByteLength]byte
+// EpochBloom represents a epoch bit bloom filter.
+type EpochBloom [EpochBloomByteLength]byte
 
-// BytesToBloomBig converts a byte slice to a bloom filter.
+// BytesToEpochBloom converts a byte slice to a bloom filter.
 // It panics if b is not of suitable size.
-func BytesToBloomBig(b []byte) BloomBig {
-	var bloom BloomBig
+func BytesToEpochBloom(b []byte) EpochBloom {
+	var bloom EpochBloom
 	bloom.SetBytes(b)
 	return bloom
 }
 
 // SetBytes sets the content of b to the given bytes.
 // It panics if d is not of suitable size.
-func (b *BloomBig) SetBytes(d []byte) {
+func (b *EpochBloom) SetBytes(d []byte) {
 	if len(b) < len(d) {
 		panic(fmt.Sprintf("bloom bytes too big %d %d", len(b), len(d)))
 	}
-	copy(b[BloomBigByteLength-len(d):], d)
+	copy(b[EpochBloomByteLength-len(d):], d)
 }
 
 // Add adds d to the filter. Future calls of Test(d) will return true.
-func (b *BloomBig) Add(d []byte) {
-	var buf [4 * BloomBigK]byte
+func (b *EpochBloom) Add(d []byte) {
+	var buf [4 * EpochBloomK]byte
 	b.add(d, buf[:])
 }
 
 // require len(item) >= 2+32+32
 // require len(buf) >= 4*k
-func (b *BloomBig) AddLog(log *Log, item []byte, buf []byte) error {
+func (b *EpochBloom) AddLog(log *Log, item []byte, buf []byte) error {
 	if log.Removed {
 		return nil // ignore removed log
 	}
@@ -78,7 +79,7 @@ func (b *BloomBig) AddLog(log *Log, item []byte, buf []byte) error {
 }
 
 // add is internal version of Add, which takes a scratch buffer for reuse (needs to be at least 4*k bytes)
-func (b *BloomBig) add(d []byte, buf []byte) {
+func (b *EpochBloom) add(d []byte, buf []byte) {
 	ii, vv := bloomBigValues(d, buf)
 	for i := 0; i < len(ii); i++ {
 		b[ii[i]] |= vv[i]
@@ -88,18 +89,18 @@ func (b *BloomBig) add(d []byte, buf []byte) {
 // Big converts b to a big integer.
 // Note: Converting a bloom filter to a big.Int and then calling GetBytes
 // does not return the same bytes, since big.Int will trim leading zeroes
-func (b BloomBig) Big() *big.Int {
+func (b EpochBloom) Big() *big.Int {
 	return new(big.Int).SetBytes(b[:])
 }
 
 // Bytes returns the backing byte slice of the bloom
-func (b BloomBig) Bytes() []byte {
+func (b EpochBloom) Bytes() []byte {
 	return b[:]
 }
 
 // Test checks if the given topic is present in the bloom filter
-func (b BloomBig) Test(topic []byte) bool {
-	var buf [4 * BloomBigK]byte
+func (b EpochBloom) Test(topic []byte) bool {
+	var buf [4 * EpochBloomK]byte
 	ii, vv := bloomBigValues(topic, buf[:])
 	for i := 0; i < len(ii); i++ {
 		if vv[i] != vv[i]&b[ii[i]] {
@@ -110,36 +111,36 @@ func (b BloomBig) Test(topic []byte) bool {
 }
 
 // MarshalText encodes b as a hex string with 0x prefix.
-func (b BloomBig) MarshalText() ([]byte, error) {
+func (b EpochBloom) MarshalText() ([]byte, error) {
 	return hexutil.Bytes(b[:]).MarshalText()
 }
 
 // UnmarshalText b as a hex string with 0x prefix.
-func (b *BloomBig) UnmarshalText(input []byte) error {
-	return hexutil.UnmarshalFixedText("BloomBig", input, b[:])
+func (b *EpochBloom) UnmarshalText(input []byte) error {
+	return hexutil.UnmarshalFixedText("EpochBloom", input, b[:])
 }
 
-// BloomBigBytes returns the bloom filter for the given data
-func BloomBigBytes(data []byte) []byte {
-	var b BloomBig
+// EpochBloomBytes returns the bloom filter for the given data
+func EpochBloomBytes(data []byte) []byte {
+	var b EpochBloom
 	b.SetBytes(data)
 	return b.Bytes()
 }
 
-func bloomBigPositions(data []byte, hashbuf []byte) (p [BloomBigK]uint) {
+func bloomBigPositions(data []byte, hashbuf []byte) (p [EpochBloomK]uint) {
 	sha := hasherPool.Get().(crypto.KeccakState)
 	sha.Reset()
 	sha.Write(data)
 	sha.Read(hashbuf)
 	hasherPool.Put(sha)
-	for i := 0; i < BloomBigK; i++ {
-		p[i] = uint(binary.BigEndian.Uint32(hashbuf[4*i:]) % BloomBigBitLength)
+	for i := 0; i < EpochBloomK; i++ {
+		p[i] = uint(binary.BigEndian.Uint32(hashbuf[4*i:]) % EpochBloomM)
 	}
 	return p
 }
 
 // bloomBigValues returns the bytes (index-value pairs) to set for the given data
-func bloomBigValues(data []byte, buf []byte) (ii [BloomBigK]uint, vv [BloomBigK]byte) {
+func bloomBigValues(data []byte, buf []byte) (ii [EpochBloomK]uint, vv [EpochBloomK]byte) {
 	p := bloomBigPositions(data, buf)
 	for i := 0; i < len(p); i++ {
 		vv[i] = byte(1 << (p[i] & 0x7))
@@ -148,23 +149,23 @@ func bloomBigValues(data []byte, buf []byte) (ii [BloomBigK]uint, vv [BloomBigK]
 	return ii, vv
 }
 
-// BloomBigLookup is a convenience-method to check presence int he bloom filter
-func BloomBigLookup(bin BloomBig, topic bytesBacked) bool {
+// EpochBloomLookup is a convenience-method to check presence int he bloom filter
+func EpochBloomLookup(bin EpochBloom, topic bytesBacked) bool {
 	return bin.Test(topic.Bytes())
 }
 
-func (b *BloomBig) Bits() (count int) {
+func (b *EpochBloom) Bits() (count int) {
 	for _, v := range b {
 		count += bits.OnesCount8(v)
 	}
 	return count
 }
 
-func (b *BloomBig) Rate() float64 {
+func (b *EpochBloom) Rate() float64 {
 	bits := b.Bits()
-	return math.Pow(float64(bits)/BloomBigBitLength, BloomBigK)
+	return math.Pow(float64(bits)/EpochBloomM, EpochBloomK)
 }
 
-func (b *BloomBig) Size() uint {
-	return uint(-BloomBigBitLength * math.Log(1-float64(b.Bits())/BloomBigBitLength) / BloomBigK)
+func (b *EpochBloom) Size() uint {
+	return uint(-EpochBloomM * math.Log(1-float64(b.Bits())/EpochBloomM) / EpochBloomK)
 }
