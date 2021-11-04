@@ -29,6 +29,7 @@ import (
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/rpc"
+	"go.mongodb.org/mongo-driver/mongo"
 )
 
 const maxFilterBlockRange = 5000
@@ -64,6 +65,8 @@ type Filter struct {
 	matcher *bloombits.Matcher
 
 	rangeLimit bool
+
+	epochColl *mongo.Collection
 }
 
 // NewRangeFilter creates a new filter which uses a bloom filter on blocks to
@@ -149,6 +152,9 @@ func (f *Filter) Logs(ctx context.Context) ([]*types.Log, error) {
 		end = head
 	}
 	if f.rangeLimit && (int64(end)-f.begin) > maxFilterBlockRange {
+		if f.epochColl != nil {
+			return f.epochLogs(ctx, end)
+		}
 		return nil, fmt.Errorf("exceed maximum block range: %d", maxFilterBlockRange)
 	}
 	// Gather all indexed logs, and finish with non indexed ones
@@ -170,6 +176,10 @@ func (f *Filter) Logs(ctx context.Context) ([]*types.Log, error) {
 	rest, err := f.unindexedLogs(ctx, end)
 	logs = append(logs, rest...)
 	return logs, err
+}
+
+func (f *Filter) epochLogs(ctx context.Context, end uint64) ([]*types.Log, error) {
+
 }
 
 // indexedLogs returns the logs matching the filter criteria based on the bloom

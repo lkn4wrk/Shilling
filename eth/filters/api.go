@@ -29,10 +29,14 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/gopool"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/event"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rpc"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 // filter is a helper struct that holds meta information over the filter type
@@ -58,6 +62,7 @@ type PublicFilterAPI struct {
 	filters    map[rpc.ID]*filter
 	timeout    time.Duration
 	rangeLimit bool
+	epochColl  *mongo.Collection
 }
 
 // NewPublicFilterAPI returns a new PublicFilterAPI instance.
@@ -70,6 +75,19 @@ func NewPublicFilterAPI(backend Backend, lightMode bool, timeout time.Duration, 
 		timeout:    timeout,
 		rangeLimit: rangeLimit,
 	}
+
+	client, err := mongo.Connect(context.TODO(), options.Client().ApplyURI(core.MongoURI))
+	if err != nil {
+		log.Error("EPOCH: unable to connect to MongoDB", err)
+	} else {
+		// defer func() {
+		// 	if err = client.Disconnect(context.TODO()); err != nil {
+		// 		log.Error("EPOCH: MongoDB disconnect", err)
+		// 	}
+		// }()
+		api.epochColl = client.Database(core.BloomDB).Collection(core.BloomCollection)
+	}
+
 	go api.timeoutLoop(timeout)
 
 	return api
@@ -349,6 +367,7 @@ func (api *PublicFilterAPI) GetLogs(ctx context.Context, crit FilterCriteria) ([
 		}
 		// Construct the range filter
 		filter = NewRangeFilter(api.backend, begin, end, crit.Addresses, crit.Topics, api.rangeLimit)
+		filter.epochColl = api.epochColl
 	}
 	// Run the filter and return all the logs
 	logs, err := filter.Logs(ctx)
@@ -404,6 +423,7 @@ func (api *PublicFilterAPI) GetFilterLogs(ctx context.Context, id rpc.ID) ([]*ty
 		}
 		// Construct the range filter
 		filter = NewRangeFilter(api.backend, begin, end, f.crit.Addresses, f.crit.Topics, api.rangeLimit)
+		filter.epochColl = api.epochColl
 	}
 	// Run the filter and return all the logs
 	logs, err := filter.Logs(ctx)

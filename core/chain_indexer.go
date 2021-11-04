@@ -37,8 +37,10 @@ import (
 )
 
 const (
-	bloomEpoch = 4096
-	mongoURI   = "mongodb://127.0.0.1:27017"
+	bloomEpoch      = 4096
+	MongoURI        = "mongodb://127.0.0.1:27017"
+	BloomDB         = "bloom"
+	BloomCollection = "bloom"
 )
 
 // ChainIndexerBackend defines the methods needed to process chain segments in
@@ -325,7 +327,7 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 
 	log.Info("EPOCH: start indexing sequence")
 
-	client, err := mongo.Connect(context.TODO(), options.Client().ApplyURI(mongoURI))
+	client, err := mongo.Connect(context.TODO(), options.Client().ApplyURI(MongoURI))
 	if err != nil {
 		log.Error("EPOCH: MongoDB connect", err)
 		return
@@ -335,7 +337,7 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 			log.Error("EPOCH: MongoDB disconnect", err)
 		}
 	}()
-	collection := client.Database("bloom").Collection("bloom")
+	collection := client.Database(BloomDB).Collection(BloomCollection)
 
 	// scratch buffers
 	item := make([]byte, 2+32+32)
