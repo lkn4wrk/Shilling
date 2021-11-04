@@ -199,6 +199,8 @@ func (f *Filter) startEpochIndexing(ctx context.Context, begin uint64, end uint6
 
 			log.Info("EPOCH: start indexing", "epoch", epoch, "from", from, "to", to)
 
+			count := 0
+
 			for blockNumber := from; blockNumber < to; blockNumber++ {
 				header, err := f.backend.HeaderByNumber(ctx, rpc.BlockNumber(blockNumber))
 				if header == nil || err != nil {
@@ -215,6 +217,7 @@ func (f *Filter) startEpochIndexing(ctx context.Context, begin uint64, end uint6
 				for _, ls := range lls {
 					for _, log := range ls {
 						epochBloom.AddLog(log, item, buf)
+						count++
 					}
 				}
 			}
@@ -228,7 +231,7 @@ func (f *Filter) startEpochIndexing(ctx context.Context, begin uint64, end uint6
 				log.Error("EPOCH: failed to update the bloom bits", "err", err)
 				return err
 			}
-			log.Info("EPOCH: finished indexing", "epoch", epoch, "rate", epochBloom.Rate(), "result", res)
+			log.Info("EPOCH: finished indexing", "epoch", epoch, "bits", epochBloom.OnesCount(), "rate%", epochBloom.Rate()*100, "count", count, "result", res)
 		}
 
 		return err
