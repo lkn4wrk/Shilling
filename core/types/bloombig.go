@@ -14,11 +14,13 @@ import (
 )
 
 const (
+	BloomBigK = 8
+
 	// BloomBigByteLength represents the number of bytes used in a header log bloom.
-	BloomBigByteLength = 256 * 4096 * 4
+	BloomBigByteLength = 256 * 4096 * 6
 
 	// BloomBigBitLength represents the number of bits used in a header log bloom.
-	BloomBigBitLength = 8 * BloomBigByteLength
+	BloomBigBitLength = BloomBigByteLength << 3
 )
 
 var EmptyBloomBig = BloomBig{}
@@ -45,11 +47,12 @@ func (b *BloomBig) SetBytes(d []byte) {
 
 // Add adds d to the filter. Future calls of Test(d) will return true.
 func (b *BloomBig) Add(d []byte) {
-	b.add(d, make([]byte, 12))
+	var buf [4 * BloomBigK]byte
+	b.add(d, buf[:])
 }
 
 // require len(item) >= 2+32+32
-// require len(buf) >= 12
+// require len(buf) >= 4*k
 func (b *BloomBig) AddLog(log *Log, item []byte, buf []byte) error {
 	if log.Removed {
 		return nil // ignore removed log
@@ -66,7 +69,7 @@ func (b *BloomBig) AddLog(log *Log, item []byte, buf []byte) error {
 		// n + topic[0] + i + topic[i]
 		item[32] = i
 		copy(item[33:], log.Topics[i].Bytes())
-		b.Add(item)
+		b.add(item[:], buf)
 	}
 	// n + topic[0] + address
 	copy(item[32:], log.Address.Bytes())
@@ -74,12 +77,12 @@ func (b *BloomBig) AddLog(log *Log, item []byte, buf []byte) error {
 	return nil
 }
 
-// add is internal version of Add, which takes a scratch buffer for reuse (needs to be at least 12 bytes)
+// add is internal version of Add, which takes a scratch buffer for reuse (needs to be at least 4*k bytes)
 func (b *BloomBig) add(d []byte, buf []byte) {
-	i1, v1, i2, v2, i3, v3 := bloomBigValues(d, buf)
-	b[i1] |= v1
-	b[i2] |= v2
-	b[i3] |= v3
+	ii, vv := bloomBigValues(d, buf)
+	for i := 0; i < len(ii); i++ {
+		b[ii[i]] |= vv[i]
+	}
 }
 
 // Big converts b to a big integer.
@@ -96,10 +99,14 @@ func (b BloomBig) Bytes() []byte {
 
 // Test checks if the given topic is present in the bloom filter
 func (b BloomBig) Test(topic []byte) bool {
-	i1, v1, i2, v2, i3, v3 := bloomBigValues(topic, make([]byte, 12))
-	return v1 == v1&b[i1] &&
-		v2 == v2&b[i2] &&
-		v3 == v3&b[i3]
+	var buf [4 * BloomBigK]byte
+	ii, vv := bloomBigValues(topic, buf[:])
+	for i := 0; i < len(ii); i++ {
+		if vv[i] != vv[i]&b[ii[i]] {
+			return false
+		}
+	}
+	return true
 }
 
 // MarshalText encodes b as a hex string with 0x prefix.
@@ -119,31 +126,26 @@ func BloomBigBytes(data []byte) []byte {
 	return b.Bytes()
 }
 
-func bloomBigPositions(data []byte, hashbuf []byte) (uint, uint, uint) {
+func bloomBigPositions(data []byte, hashbuf []byte) (p [BloomBigK]uint) {
 	sha := hasherPool.Get().(crypto.KeccakState)
 	sha.Reset()
 	sha.Write(data)
 	sha.Read(hashbuf)
 	hasherPool.Put(sha)
-	p1 := uint(binary.BigEndian.Uint32(hashbuf) % BloomBigBitLength)
-	p2 := uint(binary.BigEndian.Uint32(hashbuf[4:]) % BloomBigBitLength)
-	p3 := uint(binary.BigEndian.Uint32(hashbuf[8:]) % BloomBigBitLength)
-	return p1, p2, p3
+	for i := 0; i < BloomBigK; i++ {
+		p[i] = uint(binary.BigEndian.Uint32(hashbuf[4*i:]) % BloomBigBitLength)
+	}
+	return p
 }
 
 // bloomBigValues returns the bytes (index-value pairs) to set for the given data
-func bloomBigValues(data []byte, hashbuf []byte) (uint, byte, uint, byte, uint, byte) {
-	p1, p2, p3 := bloomBigPositions(data, hashbuf)
-
-	v1 := byte(1 << (p1 & 0x7))
-	v2 := byte(1 << (p2 & 0x7))
-	v3 := byte(1 << (p3 & 0x7))
-
-	i1 := p1 >> 3
-	i2 := p2 >> 3
-	i3 := p3 >> 3
-
-	return i1, v1, i2, v2, i3, v3
+func bloomBigValues(data []byte, buf []byte) (ii [BloomBigK]uint, vv [BloomBigK]byte) {
+	p := bloomBigPositions(data, buf)
+	for i := 0; i < len(p); i++ {
+		vv[i] = byte(1 << (p[i] & 0x7))
+		ii[i] = p[i] >> 3
+	}
+	return ii, vv
 }
 
 // BloomBigLookup is a convenience-method to check presence int he bloom filter
@@ -160,5 +162,5 @@ func (b *BloomBig) OnesCount() (count int) {
 
 func (b *BloomBig) Rate() float64 {
 	bits := b.OnesCount()
-	return math.Pow(float64(bits)/BloomBigBitLength, 3)
+	return math.Pow(float64(bits)/BloomBigBitLength, BloomBigK)
 }

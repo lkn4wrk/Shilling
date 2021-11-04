@@ -167,7 +167,7 @@ func (f *Filter) startEpochIndexing(ctx context.Context, begin uint64, end uint6
 
 		// scratch buffers
 		item := make([]byte, 2+32+32)
-		buf := make([]byte, 12)
+		buf := make([]byte, types.BloomBigK*4)
 
 		var from, to uint64
 		for end, from, to = pickEpoch(begin, end); from < to; end, from, to = pickEpoch(begin, end) {
