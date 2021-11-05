@@ -68,12 +68,12 @@ func (b *EpochBloom) AddLog(log *Log, item []byte, buf []byte) error {
 
 	for i := byte(1); i < n; i++ {
 		// n + topic[0] + i + topic[i]
-		item[32] = i
-		copy(item[33:], log.Topics[i].Bytes())
+		item[33] = i
+		copy(item[34:], log.Topics[i].Bytes())
 		b.add(item[:], buf)
 	}
 	// n + topic[0] + address
-	copy(item[32:], log.Address.Bytes())
+	copy(item[33:], log.Address.Bytes())
 	b.add(item[:1+32+20], buf)
 	return nil
 }
