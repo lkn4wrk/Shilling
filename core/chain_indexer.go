@@ -381,7 +381,7 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 
 		res, err := collection.UpdateOne(context.TODO(),
 			bson.D{primitive.E{Key: "_id", Value: epoch}},
-			bson.D{primitive.E{Key: "$set", Value: primitive.E{Key: "bits", Value: epochBloom.Bytes()}}},
+			bson.D{primitive.E{Key: "$set", Value: bson.M{"bits": epochBloom.Bytes()}}},
 			options.Update().SetUpsert(true),
 		)
 		if err != nil {
