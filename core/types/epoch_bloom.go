@@ -15,13 +15,13 @@ import (
 
 const (
 	// EpochRange represents the number of blocks per epoch bloom.
-	EpochRange = 4096
+	EpochRange = 256
 
 	// EpochBloomM represents the number of hashes used in a epoch bloom.
 	EpochBloomK = 8
 
 	// EpochBloomM represents the number of bits used in a epoch bloom.
-	EpochBloomM = 1024 * 1024 * 8 * 6
+	EpochBloomM = 2048 * EpochRange * 6
 
 	// EpochBloomByteLength represents the number of bytes used in a header log bloom.
 	EpochBloomByteLength = EpochBloomM / 8
