@@ -335,7 +335,7 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 			log.Error("EPOCH: MongoDB disconnect", err)
 		}
 	}()
-	collection := client.Database("bloom").Collection("bloom")
+	collection := client.Database("bloom").Collection("blooms")
 
 	// scratch buffers
 	item := make([]byte, 2+32+32)
