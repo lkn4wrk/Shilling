@@ -31,7 +31,6 @@ import (
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -210,8 +209,8 @@ func (c *ChainIndexer) Close() error {
 // eventLoop is a secondary - optional - event loop of the indexer which is only
 // started for the outermost indexer to push chain head events into a processing
 // queue.
+// Mark the chain indexer as active, requiring an additional teardown
 func (c *ChainIndexer) eventLoop(currentHeader *types.Header, events chan ChainHeadEvent, sub event.Subscription) {
-	// Mark the chain indexer as active, requiring an additional teardown
 	atomic.StoreUint32(&c.active, 1)
 
 	defer sub.Unsubscribe()
@@ -315,6 +314,10 @@ func (c *ChainIndexer) newHead(head uint64, reorg bool) {
 	}
 }
 
+type BloomDoc struct {
+	Epoch uint64 `bson:"_id"`
+}
+
 func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 	blockchain, ok := chain.(ChainIndexerFullChain)
 	if !ok {
@@ -341,17 +344,42 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 	buf := make([]byte, types.EpochBloomK*4)
 
 	currentEpoch := (blockchain.CurrentHeader().Number.Uint64() - c.confirmsReq) / types.EpochRange
-	for epoch := currentEpoch - 1; epoch < currentEpoch; epoch-- {
+	firstEpoch := currentEpoch
+	lastEpoch := currentEpoch - 1
+	{
+		doc := BloomDoc{}
 		err := collection.FindOne(
 			context.TODO(),
-			bson.D{primitive.E{Key: "_id", Value: epoch}},
-			&options.FindOneOptions{Projection: bson.M{"_id": 0}},
-		).Decode(&bson.M{})
+			bson.M{},
+			options.FindOne().SetProjection(bson.M{"_id": 1}).SetSort(bson.M{"_id": -1}),
+		).Decode(&doc)
 		if err == nil {
-			log.Info("EPOCH: bloombits exists, SKIP!", "epoch", epoch)
-			continue // skip the full epoch that already exist in db
+			lastEpoch = doc.Epoch
+			log.Info("EPOCH: last epoch found", "epoch", lastEpoch)
+		} else if err == mongo.ErrNoDocuments {
+			log.Info("EPOCH; last epoch not found")
+		} else {
+			log.Error("EPOCH: error finding last epoch", "err", err)
+			return
 		}
 
+		err = collection.FindOne(
+			context.TODO(),
+			bson.M{},
+			options.FindOne().SetProjection(bson.M{"_id": 1}).SetSort(bson.M{"_id": 1}),
+		).Decode(&doc)
+		if err == nil {
+			firstEpoch = doc.Epoch
+			log.Info("EPOCH: first epoch found", "epoch", firstEpoch)
+		} else if err == mongo.ErrNoDocuments {
+			log.Info("EPOCH; first epoch not found")
+		} else {
+			log.Error("EPOCH: error finding first epoch", "err", err)
+			return
+		}
+	}
+
+	for epoch := firstEpoch - 1; epoch < currentEpoch; epoch-- {
 		log.Info("EPOCH: start indexing", "epoch", epoch)
 
 		var epochBloom types.EpochBloom
@@ -379,8 +407,8 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 		}
 
 		res, err := collection.UpdateOne(context.TODO(),
-			bson.D{primitive.E{Key: "_id", Value: epoch}},
-			bson.D{primitive.E{Key: "$set", Value: bson.M{"bits": epochBloom.Bytes()}}},
+			bson.M{"_id": epoch},
+			bson.M{"$set": bson.M{"bits": epochBloom.Bytes()}},
 			options.Update().SetUpsert(true),
 		)
 		if err != nil {
