@@ -37,8 +37,7 @@ import (
 )
 
 const (
-	bloomEpoch = 4096
-	mongoURI   = "mongodb://127.0.0.1:27017"
+	mongoURI = "mongodb://127.0.0.1:27017"
 )
 
 // ChainIndexerBackend defines the methods needed to process chain segments in
@@ -341,7 +340,7 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 	item := make([]byte, 2+32+32)
 	buf := make([]byte, types.EpochBloomK*4)
 
-	currentEpoch := (blockchain.CurrentHeader().Number.Uint64() - c.confirmsReq) / bloomEpoch
+	currentEpoch := (blockchain.CurrentHeader().Number.Uint64() - c.confirmsReq) / types.EpochRange
 	for epoch := currentEpoch - 1; epoch < currentEpoch; epoch-- {
 		err := collection.FindOne(
 			context.TODO(),
@@ -358,7 +357,7 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 		var epochBloom types.EpochBloom
 		var count uint
 
-		for blockNumber := epoch * bloomEpoch; blockNumber < (epoch+1)*bloomEpoch; blockNumber++ {
+		for blockNumber := epoch * types.EpochRange; blockNumber < (epoch+1)*types.EpochRange; blockNumber++ {
 			header := blockchain.GetHeaderByNumber(blockNumber)
 			if header == nil {
 				log.Error("EPOCH: missing header", "number", blockNumber)

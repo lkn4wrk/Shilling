@@ -14,6 +14,9 @@ import (
 )
 
 const (
+	// EpochRange represents the number of blocks per epoch bloom.
+	EpochRange = 4096
+
 	// EpochBloomM represents the number of hashes used in a epoch bloom.
 	EpochBloomK = 8
 
