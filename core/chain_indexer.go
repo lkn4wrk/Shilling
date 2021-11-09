@@ -314,10 +314,6 @@ func (c *ChainIndexer) newHead(head uint64, reorg bool) {
 	}
 }
 
-type BloomDoc struct {
-	Epoch uint64 `bson:"_id"`
-}
-
 func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 	blockchain, ok := chain.(ChainIndexerFullChain)
 	if !ok {
@@ -344,42 +340,31 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 	buf := make([]byte, types.EpochBloomK*4)
 
 	currentEpoch := (blockchain.CurrentHeader().Number.Uint64() - c.confirmsReq) / types.EpochRange
-	firstEpoch := currentEpoch
-	lastEpoch := currentEpoch - 1
-	{
-		doc := BloomDoc{}
+	queryEpoch := func(order int, defaultValue uint64) (uint64, error) {
+		doc := struct {
+			Epoch uint64 `bson:"_id"`
+		}{}
 		err := collection.FindOne(
 			context.TODO(),
 			bson.M{},
-			options.FindOne().SetProjection(bson.M{"_id": 1}).SetSort(bson.M{"_id": -1}),
+			options.FindOne().SetProjection(bson.M{"_id": 1}).SetSort(bson.M{"_id": order}),
 		).Decode(&doc)
 		if err == nil {
-			lastEpoch = doc.Epoch
-			log.Info("EPOCH: last epoch found", "epoch", lastEpoch)
+			return doc.Epoch, nil
 		} else if err == mongo.ErrNoDocuments {
-			log.Info("EPOCH; last epoch not found")
+			return defaultValue, nil
 		} else {
-			log.Error("EPOCH: error finding last epoch", "err", err)
-			return
-		}
-
-		err = collection.FindOne(
-			context.TODO(),
-			bson.M{},
-			options.FindOne().SetProjection(bson.M{"_id": 1}).SetSort(bson.M{"_id": 1}),
-		).Decode(&doc)
-		if err == nil {
-			firstEpoch = doc.Epoch
-			log.Info("EPOCH: first epoch found", "epoch", firstEpoch)
-		} else if err == mongo.ErrNoDocuments {
-			log.Info("EPOCH; first epoch not found")
-		} else {
-			log.Error("EPOCH: error finding first epoch", "err", err)
-			return
+			return defaultValue, err
 		}
 	}
 
-	for epoch := firstEpoch - 1; epoch < currentEpoch; epoch-- {
+	firstEpoch, err := queryEpoch(1, currentEpoch)
+	if err != nil {
+		log.Error("EPOCH: error query first epoch", "err", err)
+		return
+	}
+
+	indexEpoch := func(epoch uint64) bool {
 		log.Info("EPOCH: start indexing", "epoch", epoch)
 
 		var epochBloom types.EpochBloom
@@ -389,13 +374,13 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 			header := blockchain.GetHeaderByNumber(blockNumber)
 			if header == nil {
 				log.Error("EPOCH: missing header", "number", blockNumber)
-				return
+				return false
 			}
 
 			receipts := blockchain.GetReceiptsByHash(header.Hash())
 			if receipts == nil {
 				log.Error("EPOCH: missing block receipts", "number", blockNumber)
-				return
+				return false
 			}
 
 			for _, receipt := range receipts {
@@ -406,16 +391,68 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 			}
 		}
 
-		res, err := collection.UpdateOne(context.TODO(),
-			bson.M{"_id": epoch},
-			bson.M{"$set": bson.M{"bits": epochBloom.Bytes()}},
-			options.Update().SetUpsert(true),
+		res, err := collection.InsertOne(context.TODO(),
+			bson.M{"_id": epoch, "bits": epochBloom.Bytes()},
 		)
 		if err != nil {
-			log.Error("EPOCH: failed to update the bloom bits", "err", err)
+			log.Error("EPOCH: failed to insert the bloom bits", "err", err)
+			return false
+		}
+		log.Info("EPOCH: finished indexing", "bits", epochBloom.Bits(), "rate%", epochBloom.Rate()*100, "size", epochBloom.Size(), "count", count, "result", res)
+		return true
+	}
+
+	log.Info("EPOCH: start past indexing")
+	for epoch := firstEpoch - 1; epoch < currentEpoch; epoch-- {
+		select {
+		case errc := <-c.quit:
+			// Chain indexer terminating, report no failure and abort
+			errc <- nil
+			log.Info("EPOCH: shutting down past indexing")
+			return
+		default:
+		}
+		if ok := indexEpoch(epoch); !ok {
 			return
 		}
-		log.Info("EPOCH: finished indexing", "epoch", epoch, "bits", epochBloom.Bits(), "rate%", epochBloom.Rate()*100, "size", epochBloom.Size(), "count", count, "result", res)
+	}
+
+	lastEpoch, err := queryEpoch(-1, currentEpoch-1)
+	if err != nil {
+		log.Error("EPOCH: error querying last epoch", "err", err)
+		return
+	}
+
+	log.Info("EPOCH: start head indexing")
+	events := make(chan ChainHeadEvent, 10)
+	sub := chain.SubscribeChainHeadEvent(events)
+	defer sub.Unsubscribe()
+
+	for {
+		select {
+		case errc := <-c.quit:
+			// Chain indexer terminating, report no failure and abort
+			errc <- nil
+			log.Info("EPOCH: shutting down head indexing")
+			return
+
+		case ev, ok := <-events:
+			// Received a new event, ensure it's not nil (closing) and update
+			if !ok {
+				errc := <-c.quit
+				errc <- nil
+				return
+			}
+			currentEpoch = (ev.Block.Header().Number.Uint64() - c.confirmsReq) / types.EpochRange
+			if lastEpoch+1 >= currentEpoch {
+				continue // current epoch not finished
+			}
+			lastEpoch++
+			log.Info("EPOCH: got head epoch", "epoch", lastEpoch)
+			if ok := indexEpoch(lastEpoch); !ok {
+				return
+			}
+		}
 	}
 }
 
