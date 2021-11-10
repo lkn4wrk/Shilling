@@ -459,13 +459,12 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 				return
 			}
 			currentEpoch = (ev.Block.Header().Number.Uint64() - c.confirmsReq) / types.EpochRange
-			if lastEpoch+1 >= currentEpoch {
-				continue // current epoch not finished
-			}
-			lastEpoch++
-			log.Info("EPOCH: got head epoch", "epoch", lastEpoch)
-			if ok := indexEpoch(lastEpoch); !ok {
-				return
+			if lastEpoch < currentEpoch {
+				log.Info("EPOCH: got head epoch", "epoch", lastEpoch)
+				if ok := indexEpoch(lastEpoch); !ok {
+					return
+				}
+				lastEpoch++
 			}
 		}
 	}
