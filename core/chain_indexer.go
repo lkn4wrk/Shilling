@@ -411,9 +411,9 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 			log.Info("EPOCH: shutting down past indexing")
 			return
 		default:
-		}
-		if ok := indexEpoch(epoch); !ok {
-			return
+			if ok := indexEpoch(epoch); !ok {
+				return
+			}
 		}
 	}
 
@@ -421,6 +421,21 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 	if err != nil {
 		log.Error("EPOCH: error querying last epoch", "err", err)
 		return
+	}
+
+	log.Info("EPOCH: start catching up head")
+	for lastEpoch++; lastEpoch < (blockchain.CurrentHeader().Number.Uint64()-c.confirmsReq)/types.EpochRange; lastEpoch++ {
+		select {
+		case errc := <-c.quit:
+			// Chain indexer terminating, report no failure and abort
+			errc <- nil
+			log.Info("EPOCH: shutting down head catching up")
+			return
+		default:
+			if ok := indexEpoch(lastEpoch); !ok {
+				return
+			}
+		}
 	}
 
 	log.Info("EPOCH: start head indexing")
