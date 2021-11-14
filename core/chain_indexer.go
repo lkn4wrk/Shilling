@@ -364,6 +364,26 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 		return
 	}
 
+	mustGetReceipts := func(blockNumber uint64) types.Receipts {
+		for {
+			header := blockchain.GetHeaderByNumber(blockNumber)
+			if header == nil {
+				log.Error("EPOCH: missing header", "number", blockNumber)
+				time.Sleep(time.Minute)
+				continue
+			}
+
+			receipts := blockchain.GetReceiptsByHash(header.Hash())
+			if receipts == nil {
+				log.Error("EPOCH: missing block receipts", "number", blockNumber)
+				time.Sleep(time.Minute)
+				continue
+			}
+
+			return receipts
+		}
+	}
+
 	indexEpoch := func(epoch uint64) bool {
 		log.Info("EPOCH: start indexing", "epoch", epoch)
 
@@ -371,18 +391,7 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 		var count uint
 
 		for blockNumber := epoch * types.EpochRange; blockNumber < (epoch+1)*types.EpochRange; blockNumber++ {
-			header := blockchain.GetHeaderByNumber(blockNumber)
-			if header == nil {
-				log.Error("EPOCH: missing header", "number", blockNumber)
-				return false
-			}
-
-			receipts := blockchain.GetReceiptsByHash(header.Hash())
-			if receipts == nil {
-				log.Error("EPOCH: missing block receipts", "number", blockNumber)
-				return false
-			}
-
+			receipts := mustGetReceipts(blockNumber)
 			for _, receipt := range receipts {
 				for _, log := range receipt.Logs {
 					epochBloom.AddLog(log, item, buf)
