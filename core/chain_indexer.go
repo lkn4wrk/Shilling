@@ -339,31 +339,6 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 	item := make([]byte, 2+32+32)
 	buf := make([]byte, types.EpochBloomK*4)
 
-	currentEpoch := (blockchain.CurrentHeader().Number.Uint64() - c.confirmsReq) / types.EpochRange
-	queryEpoch := func(order int, defaultValue uint64) (uint64, error) {
-		doc := struct {
-			Epoch uint64 `bson:"_id"`
-		}{}
-		err := collection.FindOne(
-			context.TODO(),
-			bson.M{},
-			options.FindOne().SetProjection(bson.M{"_id": 1}).SetSort(bson.M{"_id": order}),
-		).Decode(&doc)
-		if err == nil {
-			return doc.Epoch, nil
-		} else if err == mongo.ErrNoDocuments {
-			return defaultValue, nil
-		} else {
-			return defaultValue, err
-		}
-	}
-
-	firstEpoch, err := queryEpoch(1, currentEpoch)
-	if err != nil {
-		log.Error("EPOCH: error query first epoch", "err", err)
-		return
-	}
-
 	mustGetReceipts := func(blockNumber uint64) types.Receipts {
 		for {
 			header := blockchain.GetHeaderByNumber(blockNumber)
@@ -411,34 +386,41 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 		return true
 	}
 
-	log.Info("EPOCH: start past indexing")
-	for epoch := firstEpoch - 1; epoch < currentEpoch; epoch-- {
-		select {
-		case errc := <-c.quit:
-			// Chain indexer terminating, report no failure and abort
-			errc <- nil
-			log.Info("EPOCH: shutting down past indexing")
-			return
-		default:
-			if ok := indexEpoch(epoch); !ok {
-				return
-			}
+	queryEpoch := func(order int, defaultValue uint64) (uint64, error) {
+		doc := struct {
+			Epoch uint64 `bson:"_id"`
+		}{}
+		err := collection.FindOne(
+			context.TODO(),
+			bson.M{},
+			options.FindOne().SetProjection(bson.M{"_id": 1}).SetSort(bson.M{"_id": order}),
+		).Decode(&doc)
+		if err == nil {
+			return doc.Epoch, nil
+		} else if err == mongo.ErrNoDocuments {
+			return defaultValue, nil
+		} else {
+			return defaultValue, err
 		}
 	}
 
-	epoch, err := queryEpoch(-1, currentEpoch-1)
+	currentEpoch := func(head *types.Header) uint64 {
+		return (head.Number.Uint64() - c.confirmsReq) / types.EpochRange
+	}
+
+	epoch, err := queryEpoch(-1, 0)
 	if err != nil {
 		log.Error("EPOCH: error querying last epoch", "err", err)
 		return
 	}
 
-	log.Info("EPOCH: start catching up head")
-	for epoch++; epoch < (blockchain.CurrentHeader().Number.Uint64()-c.confirmsReq)/types.EpochRange; epoch++ {
+	log.Info("EPOCH: start catching up")
+	for epoch++; epoch < currentEpoch(blockchain.CurrentHeader()); epoch++ {
 		select {
 		case errc := <-c.quit:
 			// Chain indexer terminating, report no failure and abort
 			errc <- nil
-			log.Info("EPOCH: shutting down head catching up")
+			log.Info("EPOCH: shutting down epoch catching up")
 			return
 		default:
 			if ok := indexEpoch(epoch); !ok {
@@ -467,8 +449,7 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 				errc <- nil
 				return
 			}
-			currentEpoch = (ev.Block.Header().Number.Uint64() - c.confirmsReq) / types.EpochRange
-			if epoch < currentEpoch {
+			if epoch < currentEpoch(ev.Block.Header()) {
 				log.Info("EPOCH: got head epoch", "epoch", epoch)
 				if ok := indexEpoch(epoch); !ok {
 					return
