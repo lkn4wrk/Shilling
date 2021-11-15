@@ -329,6 +329,7 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 		return
 	}
 	defer func() {
+		log.Info("EPOCH: shutting down")
 		if err = client.Disconnect(context.TODO()); err != nil {
 			log.Error("EPOCH: MongoDB disconnect", err)
 		}
@@ -386,7 +387,7 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 		return true
 	}
 
-	queryEpoch := func(order int, defaultValue uint64) (uint64, error) {
+	nextEpoch := func(order int, defaultValue uint64) (uint64, error) {
 		doc := struct {
 			Epoch uint64 `bson:"_id"`
 		}{}
@@ -396,7 +397,7 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 			options.FindOne().SetProjection(bson.M{"_id": 1}).SetSort(bson.M{"_id": order}),
 		).Decode(&doc)
 		if err == nil {
-			return doc.Epoch, nil
+			return doc.Epoch + 1, nil
 		} else if err == mongo.ErrNoDocuments {
 			return defaultValue, nil
 		} else {
@@ -404,59 +405,41 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 		}
 	}
 
-	currentEpoch := func(head *types.Header) uint64 {
-		return (head.Number.Uint64() - c.confirmsReq) / types.EpochRange
-	}
-
-	epoch, err := queryEpoch(-1, 0)
+	epoch, err := nextEpoch(-1, 0)
 	if err != nil {
 		log.Error("EPOCH: error querying last epoch", "err", err)
 		return
 	}
 
 	log.Info("EPOCH: start catching up")
-	for epoch++; epoch < currentEpoch(blockchain.CurrentHeader()); epoch++ {
-		select {
-		case errc := <-c.quit:
-			// Chain indexer terminating, report no failure and abort
-			errc <- nil
-			log.Info("EPOCH: shutting down epoch catching up")
-			return
-		default:
-			if ok := indexEpoch(epoch); !ok {
-				return
-			}
-		}
-	}
-
-	log.Info("EPOCH: start head indexing")
-	events := make(chan ChainHeadEvent, 10)
-	sub := chain.SubscribeChainHeadEvent(events)
-	defer sub.Unsubscribe()
-
 	for {
-		select {
-		case errc := <-c.quit:
-			// Chain indexer terminating, report no failure and abort
-			errc <- nil
-			log.Info("EPOCH: shutting down head indexing")
-			return
-
-		case ev, ok := <-events:
-			// Received a new event, ensure it's not nil (closing) and update
-			if !ok {
-				errc := <-c.quit
+		lastBlock := (epoch+1)*types.EpochRange - 1
+		head := blockchain.CurrentHeader().Number.Uint64()
+		if lastBlock+c.confirmsReq > head {
+			blocksToWait := lastBlock + c.confirmsReq - head
+			log.Info("EPOCH: waiting for complete epoch", "blocks", blocksToWait)
+			select {
+			case errc := <-c.quit:
+				// Chain indexer terminating, report no failure and abort
 				errc <- nil
 				return
+			case <-time.After(time.Minute):
+				continue
 			}
-			if epoch < currentEpoch(ev.Block.Header()) {
-				log.Info("EPOCH: got head epoch", "epoch", epoch)
-				if ok := indexEpoch(epoch); !ok {
-					return
-				}
-				epoch++
+		} else {
+			select {
+			case errc := <-c.quit:
+				// Chain indexer terminating, report no failure and abort
+				errc <- nil
+				return
+			default:
 			}
 		}
+		if ok := indexEpoch(epoch); !ok {
+			log.Error("EPOCH: indexing epoch failed")
+			return
+		}
+		epoch++
 	}
 }
 
