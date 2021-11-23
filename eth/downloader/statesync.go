@@ -63,16 +63,8 @@ type stateSyncStats struct {
 func (d *Downloader) syncState(root common.Hash) *stateSync {
 	// Create the state sync
 	s := newStateSync(d, root)
-	select {
-	case d.stateSyncStart <- s:
-		// If we tell the statesync to restart with a new root, we also need
-		// to wait for it to actually also start -- when old requests have timed
-		// out or been delivered
-		<-s.started
-	case <-d.quitCh:
-		s.err = errCancelStateFetch
-		close(s.done)
-	}
+	// by pass any state sync
+	close(s.done)
 	return s
 }
 
