@@ -30,6 +30,13 @@ import (
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
+)
+
+const (
+	mongoURI = "mongodb://127.0.0.1:27017"
 )
 
 // ChainIndexerBackend defines the methods needed to process chain segments in
@@ -58,6 +65,13 @@ type ChainIndexerChain interface {
 
 	// SubscribeChainHeadEvent subscribes to new head header notifications.
 	SubscribeChainHeadEvent(ch chan<- ChainHeadEvent) event.Subscription
+}
+
+type ChainIndexerFullChain interface {
+	ChainIndexerChain
+
+	GetHeaderByNumber(number uint64) *types.Header
+	GetReceiptsByHash(hash common.Hash) types.Receipts
 }
 
 // ChainIndexer does a post-processing job for equally sized sections of the
@@ -150,6 +164,7 @@ func (c *ChainIndexer) Start(chain ChainIndexerChain) {
 	sub := chain.SubscribeChainHeadEvent(events)
 
 	go c.eventLoop(chain.CurrentHeader(), events, sub)
+	go c.epochIndexLoop(chain)
 }
 
 // Close tears down all goroutines belonging to the indexer and returns any error
@@ -296,6 +311,135 @@ func (c *ChainIndexer) newHead(head uint64, reorg bool) {
 			default:
 			}
 		}
+	}
+}
+
+func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
+	blockchain, ok := chain.(ChainIndexerFullChain)
+	if !ok {
+		log.Error("EPOCH: disabled for lightchain")
+		return
+	}
+
+	log.Info("EPOCH: start indexing sequence")
+
+	client, err := mongo.Connect(context.TODO(), options.Client().ApplyURI(mongoURI))
+	if err != nil {
+		log.Error("EPOCH: MongoDB connect", err)
+		return
+	}
+	defer func() {
+		log.Info("EPOCH: shutting down")
+		if err = client.Disconnect(context.TODO()); err != nil {
+			log.Error("EPOCH: MongoDB disconnect", err)
+		}
+	}()
+	collection := client.Database("bloom").Collection("blooms")
+
+	// scratch buffers
+	item := make([]byte, 2+32+32)
+	buf := make([]byte, types.EpochBloomK*4)
+
+	mustGetReceipts := func(blockNumber uint64) types.Receipts {
+		for {
+			header := blockchain.GetHeaderByNumber(blockNumber)
+			if header == nil {
+				log.Error("EPOCH: missing header", "number", blockNumber)
+				time.Sleep(time.Minute)
+				continue
+			}
+
+			receipts := blockchain.GetReceiptsByHash(header.Hash())
+			if receipts == nil {
+				log.Error("EPOCH: missing block receipts", "number", blockNumber)
+				time.Sleep(time.Minute)
+				continue
+			}
+
+			return receipts
+		}
+	}
+
+	indexEpoch := func(epoch uint64) bool {
+		log.Info("EPOCH: start indexing", "epoch", epoch)
+
+		var epochBloom types.EpochBloom
+		var count uint
+
+		for blockNumber := epoch * types.EpochRange; blockNumber < (epoch+1)*types.EpochRange; blockNumber++ {
+			receipts := mustGetReceipts(blockNumber)
+			for _, receipt := range receipts {
+				for _, log := range receipt.Logs {
+					epochBloom.AddLog(log, item, buf)
+					count++
+				}
+			}
+		}
+
+		res, err := collection.InsertOne(context.TODO(),
+			bson.M{"_id": epoch, "bits": epochBloom.Bytes()},
+		)
+		if err != nil {
+			log.Error("EPOCH: failed to insert the bloom bits", "err", err)
+			return false
+		}
+		log.Info("EPOCH: finished indexing", "bits", epochBloom.Bits(), "rate%", epochBloom.Rate()*100, "size", epochBloom.Size(), "count", count, "result", res)
+		return true
+	}
+
+	nextEpoch := func(order int, defaultValue uint64) (uint64, error) {
+		doc := struct {
+			Epoch uint64 `bson:"_id"`
+		}{}
+		err := collection.FindOne(
+			context.TODO(),
+			bson.M{},
+			options.FindOne().SetProjection(bson.M{"_id": 1}).SetSort(bson.M{"_id": order}),
+		).Decode(&doc)
+		if err == nil {
+			return doc.Epoch + 1, nil
+		} else if err == mongo.ErrNoDocuments {
+			return defaultValue, nil
+		} else {
+			return defaultValue, err
+		}
+	}
+
+	epoch, err := nextEpoch(-1, 0)
+	if err != nil {
+		log.Error("EPOCH: error querying last epoch", "err", err)
+		return
+	}
+
+	log.Info("EPOCH: start catching up")
+	for {
+		lastBlock := (epoch+1)*types.EpochRange - 1
+		head := blockchain.CurrentHeader().Number.Uint64()
+		if lastBlock+c.confirmsReq > head {
+			blocksToWait := lastBlock + c.confirmsReq - head
+			log.Info("EPOCH: waiting for complete epoch", "blocks", blocksToWait)
+			select {
+			case errc := <-c.quit:
+				// Chain indexer terminating, report no failure and abort
+				errc <- nil
+				return
+			case <-time.After(time.Minute):
+				continue
+			}
+		} else {
+			select {
+			case errc := <-c.quit:
+				// Chain indexer terminating, report no failure and abort
+				errc <- nil
+				return
+			default:
+			}
+		}
+		if ok := indexEpoch(epoch); !ok {
+			log.Error("EPOCH: indexing epoch failed")
+			return
+		}
+		epoch++
 	}
 }
 
