@@ -30,13 +30,16 @@ import (
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/params"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 const (
-	mongoURI = "mongodb://127.0.0.1:27017"
+	mongoURI    = "mongodb://127.0.0.1:27017"
+	mongoName   = "bloom"
+	mongoPrefix = "bloom"
 )
 
 // ChainIndexerBackend defines the methods needed to process chain segments in
@@ -72,6 +75,7 @@ type ChainIndexerFullChain interface {
 
 	GetHeaderByNumber(number uint64) *types.Header
 	GetReceiptsByHash(hash common.Hash) types.Receipts
+	Config() *params.ChainConfig
 }
 
 // ChainIndexer does a post-processing job for equally sized sections of the
@@ -334,7 +338,7 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 			log.Error("EPOCH: MongoDB disconnect", err)
 		}
 	}()
-	collection := client.Database("bloom").Collection("blooms")
+	collection := client.Database(mongoName).Collection(mongoPrefix + blockchain.Config().ChainID.Text(16))
 
 	// scratch buffers
 	item := make([]byte, 2+32+32)
