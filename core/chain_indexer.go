@@ -370,7 +370,9 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 		var epochBloom types.EpochBloom
 		var count uint
 
-		for blockNumber := epoch * types.EpochRange; blockNumber < (epoch+1)*types.EpochRange; blockNumber++ {
+		first := epoch * types.EpochRange
+
+		for blockNumber := first; blockNumber < (epoch+1)*types.EpochRange; blockNumber++ {
 			receipts := mustGetReceipts(blockNumber)
 			for _, receipt := range receipts {
 				for _, log := range receipt.Logs {
@@ -381,7 +383,11 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 		}
 
 		res, err := collection.InsertOne(context.TODO(),
-			bson.M{"_id": epoch, "bits": epochBloom.Bytes()},
+			bson.M{
+				"_id":   first,
+				"range": types.EpochRange,
+				"bits":  epochBloom.Bytes(),
+			},
 		)
 		if err != nil {
 			log.Error("EPOCH: failed to insert the bloom bits", "err", err)
@@ -393,7 +399,7 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 
 	nextEpoch := func(order int, defaultValue uint64) (uint64, error) {
 		doc := struct {
-			Epoch uint64 `bson:"_id"`
+			First uint64 `bson:"_id"`
 		}{}
 		err := collection.FindOne(
 			context.TODO(),
@@ -401,7 +407,7 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 			options.FindOne().SetProjection(bson.M{"_id": 1}).SetSort(bson.M{"_id": order}),
 		).Decode(&doc)
 		if err == nil {
-			return doc.Epoch + 1, nil
+			return doc.First/types.EpochRange + 1, nil
 		} else if err == mongo.ErrNoDocuments {
 			return defaultValue, nil
 		} else {
