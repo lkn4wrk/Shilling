@@ -381,19 +381,26 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 				}
 			}
 		}
+		log.Info("EPOCH: finished indexing", "bits", epochBloom.Bits(), "rate%", epochBloom.Rate()*100, "size", epochBloom.Size(), "count", count)
 
-		res, err := collection.InsertOne(context.TODO(),
-			bson.M{
-				"_id":   first,
-				"range": types.EpochRange,
-				"bits":  epochBloom.Bytes(),
-			},
-		)
-		if err != nil {
-			log.Error("EPOCH: failed to insert the bloom bits", "err", err)
-			return false
-		}
-		log.Info("EPOCH: finished indexing", "bits", epochBloom.Bits(), "rate%", epochBloom.Rate()*100, "size", epochBloom.Size(), "count", count, "result", res)
+		go func() {
+			for {
+				res, err := collection.InsertOne(context.TODO(),
+					bson.M{
+						"_id":   first,
+						"range": types.EpochRange,
+						"bits":  epochBloom.Bytes(),
+					},
+				)
+				if err == nil {
+					log.Info("EPOCH: successfully written", "result", res)
+					return
+				}
+
+				log.Error("EPOCH: failed to insert, retrying..", "err", err)
+			}
+		}()
+
 		return true
 	}
 
