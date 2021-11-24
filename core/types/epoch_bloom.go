@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"math/bits"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 )
@@ -27,7 +28,9 @@ const (
 	EpochBloomByteLength = EpochBloomM / 8
 )
 
-var EmptyEpochBloom = EpochBloom{}
+var CollidedTopics = map[common.Hash]byte{
+	common.HexToHash("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"): 3, // ERC20 Transfer
+}
 
 // EpochBloom represents a epoch bit bloom filter.
 type EpochBloom [EpochBloomByteLength]byte
@@ -66,7 +69,11 @@ func (b *EpochBloom) AddLog(log *Log, item []byte, buf []byte) error {
 		return nil // ignore log with no topic
 	}
 
-	item[0] = n
+	if mostPopular, collided := CollidedTopics[log.Topics[0]]; collided && n != mostPopular {
+		item[0] = n
+	} else {
+		item[0] = 0
+	}
 	copy(item[1:], log.Topics[0].Bytes())
 
 	for i := byte(1); i < n; i++ {
