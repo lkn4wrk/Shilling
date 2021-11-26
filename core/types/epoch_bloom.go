@@ -15,17 +15,8 @@ import (
 )
 
 const (
-	// EpochRange represents the number of blocks per epoch bloom.
-	EpochRange = 256
-
 	// EpochBloomM represents the number of hashes used in a epoch bloom.
 	EpochBloomK = 8
-
-	// EpochBloomM represents the number of bits used in a epoch bloom.
-	EpochBloomM = 2048 * EpochRange * 6
-
-	// EpochBloomByteLength represents the number of bytes used in a header log bloom.
-	EpochBloomByteLength = EpochBloomM / 8
 )
 
 var CollidedTopics = map[common.Hash]byte{
@@ -33,34 +24,39 @@ var CollidedTopics = map[common.Hash]byte{
 }
 
 // EpochBloom represents a epoch bit bloom filter.
-type EpochBloom [EpochBloomByteLength]byte
+type EpochBloom []byte
+
+func NewBloom(blocks int, ratio int) EpochBloom {
+	size := blocks * ratio * 2048
+	return make(EpochBloom, size)
+}
 
 // BytesToEpochBloom converts a byte slice to a bloom filter.
 // It panics if b is not of suitable size.
 func BytesToEpochBloom(b []byte) EpochBloom {
-	var bloom EpochBloom
+	bloom := make(EpochBloom, len(b))
 	bloom.SetBytes(b)
 	return bloom
 }
 
 // SetBytes sets the content of b to the given bytes.
 // It panics if d is not of suitable size.
-func (b *EpochBloom) SetBytes(d []byte) {
+func (b EpochBloom) SetBytes(d []byte) {
 	if len(b) < len(d) {
 		panic(fmt.Sprintf("bloom bytes too big %d %d", len(b), len(d)))
 	}
-	copy(b[EpochBloomByteLength-len(d):], d)
+	copy(b[len(b)-len(d):], d) // TODO: why copy to the end of b here?
 }
 
 // Add adds d to the filter. Future calls of Test(d) will return true.
-func (b *EpochBloom) Add(d []byte) {
+func (b EpochBloom) Add(d []byte) {
 	var buf [4 * EpochBloomK]byte
 	b.add(d, buf[:])
 }
 
 // require len(item) >= 2+32+32
 // require len(buf) >= 4*k
-func (b *EpochBloom) AddLog(log *Log, item []byte, buf []byte) error {
+func (b EpochBloom) AddLog(log *Log, item []byte, buf []byte) error {
 	if log.Removed {
 		return nil // ignore removed log
 	}
@@ -89,8 +85,9 @@ func (b *EpochBloom) AddLog(log *Log, item []byte, buf []byte) error {
 }
 
 // add is internal version of Add, which takes a scratch buffer for reuse (needs to be at least 4*k bytes)
-func (b *EpochBloom) add(d []byte, buf []byte) {
-	ii, vv := bloomBigValues(d, buf)
+func (b EpochBloom) add(d []byte, buf []byte) {
+	m := uint32(len(b)) * 8
+	ii, vv := bloomBigValues(m, d, buf)
 	for i := 0; i < len(ii); i++ {
 		b[ii[i]] |= vv[i]
 	}
@@ -110,8 +107,9 @@ func (b EpochBloom) Bytes() []byte {
 
 // Test checks if the given topic is present in the bloom filter
 func (b EpochBloom) Test(topic []byte) bool {
+	m := uint32(len(b)) * 8
 	var buf [4 * EpochBloomK]byte
-	ii, vv := bloomBigValues(topic, buf[:])
+	ii, vv := bloomBigValues(m, topic, buf[:])
 	for i := 0; i < len(ii); i++ {
 		if vv[i] != vv[i]&b[ii[i]] {
 			return false
@@ -126,7 +124,7 @@ func (b EpochBloom) MarshalText() ([]byte, error) {
 }
 
 // UnmarshalText b as a hex string with 0x prefix.
-func (b *EpochBloom) UnmarshalText(input []byte) error {
+func (b EpochBloom) UnmarshalText(input []byte) error {
 	return hexutil.UnmarshalFixedText("EpochBloom", input, b[:])
 }
 
@@ -137,21 +135,21 @@ func EpochBloomBytes(data []byte) []byte {
 	return b.Bytes()
 }
 
-func bloomBigPositions(data []byte, hashbuf []byte) (p [EpochBloomK]uint) {
+func bloomBigPositions(m uint32, data []byte, hashbuf []byte) (p [EpochBloomK]uint) {
 	sha := hasherPool.Get().(crypto.KeccakState)
 	sha.Reset()
 	sha.Write(data)
 	sha.Read(hashbuf)
 	hasherPool.Put(sha)
 	for i := 0; i < EpochBloomK; i++ {
-		p[i] = uint(binary.BigEndian.Uint32(hashbuf[4*i:]) % EpochBloomM)
+		p[i] = uint(binary.BigEndian.Uint32(hashbuf[4*i:]) % m)
 	}
 	return p
 }
 
 // bloomBigValues returns the bytes (index-value pairs) to set for the given data
-func bloomBigValues(data []byte, buf []byte) (ii [EpochBloomK]uint, vv [EpochBloomK]byte) {
-	p := bloomBigPositions(data, buf)
+func bloomBigValues(m uint32, data []byte, buf []byte) (ii [EpochBloomK]uint, vv [EpochBloomK]byte) {
+	p := bloomBigPositions(m, data, buf)
 	for i := 0; i < len(p); i++ {
 		vv[i] = byte(1 << (p[i] & 0x7))
 		ii[i] = p[i] >> 3
@@ -164,18 +162,20 @@ func EpochBloomLookup(bin EpochBloom, topic bytesBacked) bool {
 	return bin.Test(topic.Bytes())
 }
 
-func (b *EpochBloom) Bits() (count int) {
+func (b EpochBloom) Bits() (count int) {
 	for _, v := range b {
 		count += bits.OnesCount8(v)
 	}
 	return count
 }
 
-func (b *EpochBloom) Rate() float64 {
+func (b EpochBloom) Rate() float64 {
+	m := float64(len(b)) * 8
 	bits := b.Bits()
-	return math.Pow(float64(bits)/EpochBloomM, EpochBloomK)
+	return math.Pow(float64(bits)/m, EpochBloomK)
 }
 
-func (b *EpochBloom) Size() uint {
-	return uint(-EpochBloomM * math.Log(1-float64(b.Bits())/EpochBloomM) / EpochBloomK)
+func (b EpochBloom) Size() uint {
+	m := float64(len(b)) * 8
+	return uint(-m * math.Log(1-float64(b.Bits())/m) / EpochBloomK)
 }

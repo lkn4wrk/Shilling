@@ -364,15 +364,17 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 		}
 	}
 
+	const EpochRange = 256
+	const EpochRatio = 6
+
 	indexEpoch := func(epoch uint64) bool {
 		log.Info("EPOCH: start indexing", "epoch", epoch)
 
-		var epochBloom types.EpochBloom
 		var count uint
+		epochBloom := types.NewBloom(EpochRange, EpochRatio)
+		first := epoch * EpochRange
 
-		first := epoch * types.EpochRange
-
-		for blockNumber := first; blockNumber < (epoch+1)*types.EpochRange; blockNumber++ {
+		for blockNumber := first; blockNumber < (epoch+1)*EpochRange; blockNumber++ {
 			receipts := mustGetReceipts(blockNumber)
 			for _, receipt := range receipts {
 				for _, log := range receipt.Logs {
@@ -388,7 +390,7 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 				res, err := collection.InsertOne(context.TODO(),
 					bson.M{
 						"_id":   first,
-						"range": types.EpochRange,
+						"range": EpochRange,
 						"bits":  epochBloom.Bytes(),
 					},
 				)
@@ -414,7 +416,7 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 			options.FindOne().SetProjection(bson.M{"_id": 1}).SetSort(bson.M{"_id": order}),
 		).Decode(&doc)
 		if err == nil {
-			return doc.First/types.EpochRange + 1, nil
+			return doc.First/EpochRange + 1, nil
 		} else if err == mongo.ErrNoDocuments {
 			return defaultValue, nil
 		} else {
@@ -430,7 +432,7 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 
 	log.Info("EPOCH: start catching up")
 	for {
-		lastBlock := (epoch+1)*types.EpochRange - 1
+		lastBlock := (epoch+1)*EpochRange - 1
 		head := blockchain.CurrentHeader().Number.Uint64()
 		if lastBlock+c.confirmsReq > head {
 			blocksToWait := lastBlock + c.confirmsReq - head
