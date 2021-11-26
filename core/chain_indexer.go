@@ -372,13 +372,17 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 
 		var count uint
 		epochBloom := types.NewBloom(EpochRange, EpochRatio)
+		blooms := []types.EpochBloom{epochBloom}
 		first := epoch * EpochRange
 
 		for blockNumber := first; blockNumber < (epoch+1)*EpochRange; blockNumber++ {
 			receipts := mustGetReceipts(blockNumber)
 			for _, receipt := range receipts {
-				for _, log := range receipt.Logs {
-					epochBloom.AddLog(log, item, buf)
+				for _, l := range receipt.Logs {
+					if err := l.AddToBlooms(blooms, item, buf); err != nil {
+						log.Error("EPOCH: failed to add log to blooms", "err", err)
+						return false
+					}
 					count++
 				}
 			}

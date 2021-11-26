@@ -56,7 +56,7 @@ func (b EpochBloom) Add(d []byte) {
 
 // require len(item) >= 2+32+32
 // require len(buf) >= 4*k
-func (b EpochBloom) AddLog(log *Log, item []byte, buf []byte) error {
+func (log *Log) AddToBlooms(bs []EpochBloom, item []byte, buf []byte) error {
 	if log.Removed {
 		return nil // ignore removed log
 	}
@@ -76,11 +76,17 @@ func (b EpochBloom) AddLog(log *Log, item []byte, buf []byte) error {
 		// n + topic[0] + i + topic[i]
 		item[33] = i
 		copy(item[34:], log.Topics[i].Bytes())
-		b.add(item[:], buf)
+		// TODO: optimize this to hash only once
+		for _, b := range bs {
+			b.add(item[:], buf)
+		}
 	}
 	// n + topic[0] + address
 	copy(item[33:], log.Address.Bytes())
-	b.add(item[:1+32+20], buf)
+	// TODO: optimize this to hash only once
+	for _, b := range bs {
+		b.add(item[:1+32+20], buf)
+	}
 	return nil
 }
 
