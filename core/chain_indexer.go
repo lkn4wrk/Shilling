@@ -367,47 +367,21 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 	const EpochRange = 256
 	const EpochRatio = 6
 
-	indexEpoch := func(epoch uint64) bool {
-		log.Info("EPOCH: start indexing", "epoch", epoch)
-
-		var count uint
-		epochBloom := types.NewBloom(EpochRange, EpochRatio)
-		blooms := []types.EpochBloom{epochBloom}
-		first := epoch * EpochRange
-
-		for blockNumber := first; blockNumber < (epoch+1)*EpochRange; blockNumber++ {
+	indexEpoch := func(blooms []types.EpochBloom, first uint64, n uint64) int {
+		var count int
+		for blockNumber := first; blockNumber < first+n; blockNumber++ {
 			receipts := mustGetReceipts(blockNumber)
 			for _, receipt := range receipts {
 				for _, l := range receipt.Logs {
 					if err := l.AddToBlooms(blooms, item, buf); err != nil {
 						log.Error("EPOCH: failed to add log to blooms", "err", err)
-						return false
+						return -1
 					}
 					count++
 				}
 			}
 		}
-		log.Info("EPOCH: finished indexing", "bits", epochBloom.Bits(), "rate%", epochBloom.Rate()*100, "size", epochBloom.Size(), "count", count)
-
-		go func() {
-			for {
-				res, err := collection.InsertOne(context.TODO(),
-					bson.M{
-						"_id":   first,
-						"range": EpochRange,
-						"bits":  epochBloom.Bytes(),
-					},
-				)
-				if err == nil {
-					log.Info("EPOCH: successfully written", "result", res)
-					return
-				}
-
-				log.Error("EPOCH: failed to insert, retrying..", "err", err)
-			}
-		}()
-
-		return true
+		return count
 	}
 
 	nextEpoch := func(order int, defaultValue uint64) (uint64, error) {
@@ -458,11 +432,40 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 			default:
 			}
 		}
-		if ok := indexEpoch(epoch); !ok {
+
+		epochBloom := types.NewBloom(EpochRange, EpochRatio)
+		blooms := []types.EpochBloom{epochBloom}
+		first := epoch * EpochRange
+
+		log.Info("EPOCH: start indexing", "from", first, "range", EpochRange)
+
+		count := indexEpoch(blooms, first, EpochRange)
+		if count < 0 {
 			log.Error("EPOCH: indexing epoch failed")
 			return
 		}
 		epoch++
+
+		log.Info("EPOCH: finished indexing", "bits", epochBloom.Bits(), "rate%", epochBloom.Rate()*100, "size", epochBloom.Size(), "count", count)
+
+		// don't wait for db write
+		go func() {
+			for {
+				res, err := collection.InsertOne(context.TODO(),
+					bson.M{
+						"_id":   first,
+						"range": EpochRange,
+						"bits":  epochBloom.Bytes(),
+					},
+				)
+				if err == nil {
+					log.Info("EPOCH: successfully written", "res", res)
+					return
+				}
+
+				log.Error("EPOCH: failed to insert, retrying..", "err", err)
+			}
+		}()
 	}
 }
 
