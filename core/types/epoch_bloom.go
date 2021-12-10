@@ -48,10 +48,10 @@ func BytesToEpochBloom(b []byte) EpochBloom {
 // SetBytes sets the content of b to the given bytes.
 // It panics if d is not of suitable size.
 func (b EpochBloom) SetBytes(d []byte) {
-	if len(b) < len(d) {
-		panic(fmt.Sprintf("bloom bytes too big %d %d", len(b), len(d)))
+	if len(b) != len(d) {
+		panic(fmt.Sprintf("bloom bytes mismatches %d != %d", len(b), len(d)))
 	}
-	copy(b[len(b)-len(d):], d) // TODO: why copy to the end of b here?
+	copy(b, d)
 }
 
 // Add adds d to the filter. Future calls of Test(d) will return true.
