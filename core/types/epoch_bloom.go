@@ -33,8 +33,15 @@ type BloomDocument struct {
 }
 
 func NewBloom(blocks int, ratio int) EpochBloom {
-	size := blocks * ratio * 2048 / 8
-	return make(EpochBloom, size)
+	m := blocks * ratio * 2048
+	return NewBloomWithM(m)
+}
+
+func NewBloomWithM(m int) EpochBloom {
+	if m%8 != 0 {
+		panic("invalid bloom m")
+	}
+	return make(EpochBloom, m/8)
 }
 
 // BytesToEpochBloom converts a byte slice to a bloom filter.
