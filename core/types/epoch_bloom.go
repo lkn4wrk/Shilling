@@ -33,7 +33,7 @@ type BloomDocument struct {
 }
 
 func NewBloom(blocks int, ratio int) EpochBloom {
-	size := blocks * ratio * 2048
+	size := blocks * ratio * 2048 / 8
 	return make(EpochBloom, size)
 }
 
