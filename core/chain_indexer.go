@@ -17,6 +17,7 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -384,28 +385,61 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 		return count
 	}
 
-	nextEpoch := func(order int, defaultValue uint64) (uint64, error) {
-		doc := struct {
-			First uint64 `bson:"_id"`
-		}{}
+	lastDocument := func(bitsProjection int) (*types.BloomDocument, error) {
+		projection := bson.M{
+			"_id":   1,
+			"range": 1,
+			"bits":  bitsProjection,
+		}
+		doc := types.BloomDocument{}
 		err := collection.FindOne(
 			context.TODO(),
 			bson.M{},
-			options.FindOne().SetProjection(bson.M{"_id": 1}).SetSort(bson.M{"_id": order}),
+			options.FindOne().SetProjection(projection).SetSort(bson.M{"_id": -1}),
 		).Decode(&doc)
 		if err == nil {
-			return doc.First/EpochRange + 1, nil
-		} else if err == mongo.ErrNoDocuments {
-			return defaultValue, nil
-		} else {
-			return defaultValue, err
+			return &doc, nil
 		}
+		if err == mongo.ErrNoDocuments {
+			return nil, nil
+		}
+		return nil, err
 	}
 
-	epoch, err := nextEpoch(-1, 0)
+	doc, err := lastDocument(1)
 	if err != nil {
-		log.Error("EPOCH: error querying last epoch", "err", err)
+		log.Error("EPOCH: error querying last document", "err", err)
 		return
+	}
+
+	var epoch uint64
+
+	if doc != nil {
+		// verify the last _id
+		if doc.Range != EpochRange || doc.First%EpochRange != 0 {
+			log.Error("EPOCH: unexpected last document _id and/or range", "first", doc.First, "range", doc.Range)
+			return
+		}
+
+		// verify the last doc here
+		epochBloom := types.NewBloom(doc.Range, EpochRatio)
+		blooms := []types.EpochBloom{epochBloom}
+
+		log.Info("EPOCH: start verify the last epoch", "from", doc.First, "range", doc.Range)
+
+		count := indexEpoch(blooms, doc.First, uint64(doc.Range))
+		if count < 0 {
+			log.Error("EPOCH: indexing last epoch failed")
+			return
+		}
+
+		if !bytes.Equal(doc.Bits, epochBloom.Bytes()) {
+			log.Error("EPOCH: invalid last epoch bloom bits")
+			return
+		}
+
+		// advance to the next epoch
+		epoch = doc.First/EpochRange + 1
 	}
 
 	log.Info("EPOCH: start catching up")

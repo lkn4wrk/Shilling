@@ -26,6 +26,12 @@ var CollidedTopics = map[common.Hash]byte{
 // EpochBloom represents a epoch bit bloom filter.
 type EpochBloom []byte
 
+type BloomDocument struct {
+	First uint64 `bson:"_id"`
+	Range int    `bson:"range"`
+	Bits  []byte `bson:"bits"`
+}
+
 func NewBloom(blocks int, ratio int) EpochBloom {
 	size := blocks * ratio * 2048
 	return make(EpochBloom, size)
