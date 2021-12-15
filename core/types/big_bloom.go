@@ -25,8 +25,8 @@ type BigBloom struct {
 	k    int
 	bits []byte
 
-	pOffset int // byte offset for partition selection
-	kOffset int // byte offset for the first hash
+	pPos int // 32 bytes offset for partition selection
+	kPos int // 32 bytes offset for the first hash
 }
 
 type BloomDocument struct {
@@ -48,8 +48,8 @@ func NewBloomWithM(m int) BigBloom {
 		k:    8,
 		bits: make([]byte, m/8),
 
-		pOffset: 0,
-		kOffset: 0,
+		pPos: 0,
+		kPos: 0,
 	}
 }
 
@@ -123,7 +123,7 @@ func (log *Log) AddToBlooms(bs []BigBloom, item []byte, buf []byte) error {
 func (b BigBloom) add(d []byte, buf []byte) {
 	m := uint32(b.M())
 	ii, vv := bloomBigValues(m, d, buf)
-	for i := 0; i < len(ii); i++ {
+	for i := b.kPos; i < b.kPos+b.k; i++ {
 		b.bits[ii[i]] |= vv[i]
 	}
 }
@@ -138,7 +138,7 @@ func (b BigBloom) Test(topic []byte) bool {
 	m := uint32(b.M())
 	var buf [4 * MaxK]byte
 	ii, vv := bloomBigValues(m, topic, buf[:])
-	for i := 0; i < len(ii); i++ {
+	for i := b.kPos; i < b.kPos+b.k; i++ {
 		if vv[i] != vv[i]&b.bits[ii[i]] {
 			return false
 		}
