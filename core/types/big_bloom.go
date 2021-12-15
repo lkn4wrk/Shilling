@@ -158,13 +158,6 @@ func (b BigBloom) Test(topic []byte) bool {
 	return b.testPositions(p)
 }
 
-// EpochBloomBytes returns the bloom filter for the given data
-func EpochBloomBytes(data []byte) []byte {
-	var b BigBloom
-	b.SetBytes(data)
-	return b.Bytes()
-}
-
 func hashPositions(data []byte, hashbuf []byte) (p [MaxK]uint32) {
 	sha := hasherPool.Get().(crypto.KeccakState)
 	sha.Reset()
