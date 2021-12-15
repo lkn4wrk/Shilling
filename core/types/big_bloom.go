@@ -6,17 +6,14 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
-	"math/big"
 	"math/bits"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
 const (
-	// EpochBloomM represents the number of hashes used in a epoch bloom.
-	EpochBloomK = 8
+	MaxK = 8
 )
 
 var CollidedTopics = map[common.Hash]byte{
@@ -24,7 +21,13 @@ var CollidedTopics = map[common.Hash]byte{
 }
 
 // BigBloom represents a epoch bit bloom filter.
-type BigBloom []byte
+type BigBloom struct {
+	k    int
+	bits []byte
+
+	pOffset int // byte offset for partition selection
+	kOffset int // byte offset for the first hash
+}
 
 type BloomDocument struct {
 	First uint64 `bson:"_id"`
@@ -41,13 +44,20 @@ func NewBloomWithM(m int) BigBloom {
 	if m%8 != 0 {
 		panic("invalid bloom m")
 	}
-	return make(BigBloom, m/8)
+	return BigBloom{
+		k:    8,
+		bits: make([]byte, m/8),
+
+		pOffset: 0,
+		kOffset: 0,
+	}
 }
 
 // BytesToEpochBloom converts a byte slice to a bloom filter.
 // It panics if b is not of suitable size.
 func BytesToEpochBloom(b []byte) BigBloom {
-	bloom := make(BigBloom, len(b))
+	m := len(b) * 8
+	bloom := NewBloomWithM(m)
 	bloom.SetBytes(b)
 	return bloom
 }
@@ -55,15 +65,15 @@ func BytesToEpochBloom(b []byte) BigBloom {
 // SetBytes sets the content of b to the given bytes.
 // It panics if d is not of suitable size.
 func (b BigBloom) SetBytes(d []byte) {
-	if len(b) != len(d) {
-		panic(fmt.Sprintf("bloom bytes mismatches %d != %d", len(b), len(d)))
+	if len(b.bits) != len(d) {
+		panic(fmt.Sprintf("bloom bytes mismatches %d != %d", len(b.bits), len(d)))
 	}
-	copy(b, d)
+	copy(b.bits, d)
 }
 
 // Add adds d to the filter. Future calls of Test(d) will return true.
 func (b BigBloom) Add(d []byte) {
-	var buf [4 * EpochBloomK]byte
+	var buf [4 * MaxK]byte
 	b.add(d, buf[:])
 }
 
@@ -111,32 +121,32 @@ func (log *Log) AddToBlooms(bs []BigBloom, item []byte, buf []byte) error {
 
 // add is internal version of Add, which takes a scratch buffer for reuse (needs to be at least 4*k bytes)
 func (b BigBloom) add(d []byte, buf []byte) {
-	m := uint32(len(b)) * 8
+	m := uint32(b.M())
 	ii, vv := bloomBigValues(m, d, buf)
 	for i := 0; i < len(ii); i++ {
-		b[ii[i]] |= vv[i]
+		b.bits[ii[i]] |= vv[i]
 	}
 }
 
 // Big converts b to a big integer.
 // Note: Converting a bloom filter to a big.Int and then calling GetBytes
 // does not return the same bytes, since big.Int will trim leading zeroes
-func (b BigBloom) Big() *big.Int {
-	return new(big.Int).SetBytes(b[:])
-}
+// func (b BigBloom) Big() *big.Int {
+// 	return new(big.Int).SetBytes(b.bits[:])
+// }
 
 // Bytes returns the backing byte slice of the bloom
 func (b BigBloom) Bytes() []byte {
-	return b[:]
+	return b.bits[:]
 }
 
 // Test checks if the given topic is present in the bloom filter
 func (b BigBloom) Test(topic []byte) bool {
-	m := uint32(len(b)) * 8
-	var buf [4 * EpochBloomK]byte
+	m := uint32(b.M())
+	var buf [4 * MaxK]byte
 	ii, vv := bloomBigValues(m, topic, buf[:])
 	for i := 0; i < len(ii); i++ {
-		if vv[i] != vv[i]&b[ii[i]] {
+		if vv[i] != vv[i]&b.bits[ii[i]] {
 			return false
 		}
 	}
@@ -144,14 +154,14 @@ func (b BigBloom) Test(topic []byte) bool {
 }
 
 // MarshalText encodes b as a hex string with 0x prefix.
-func (b BigBloom) MarshalText() ([]byte, error) {
-	return hexutil.Bytes(b[:]).MarshalText()
-}
+// func (b BigBloom) MarshalText() ([]byte, error) {
+// 	return hexutil.Bytes(b.bits[:]).MarshalText()
+// }
 
 // UnmarshalText b as a hex string with 0x prefix.
-func (b BigBloom) UnmarshalText(input []byte) error {
-	return hexutil.UnmarshalFixedText("BigBloom", input, b[:])
-}
+// func (b BigBloom) UnmarshalText(input []byte) error {
+// 	return hexutil.UnmarshalFixedText("BigBloom", input, b[:])
+// }
 
 // EpochBloomBytes returns the bloom filter for the given data
 func EpochBloomBytes(data []byte) []byte {
@@ -160,20 +170,20 @@ func EpochBloomBytes(data []byte) []byte {
 	return b.Bytes()
 }
 
-func bloomBigPositions(m uint32, data []byte, hashbuf []byte) (p [EpochBloomK]uint) {
+func bloomBigPositions(m uint32, data []byte, hashbuf []byte) (p [MaxK]uint) {
 	sha := hasherPool.Get().(crypto.KeccakState)
 	sha.Reset()
 	sha.Write(data)
 	sha.Read(hashbuf)
 	hasherPool.Put(sha)
-	for i := 0; i < EpochBloomK; i++ {
+	for i := 0; i < MaxK; i++ {
 		p[i] = uint(binary.BigEndian.Uint32(hashbuf[4*i:]) % m)
 	}
 	return p
 }
 
 // bloomBigValues returns the bytes (index-value pairs) to set for the given data
-func bloomBigValues(m uint32, data []byte, buf []byte) (ii [EpochBloomK]uint, vv [EpochBloomK]byte) {
+func bloomBigValues(m uint32, data []byte, buf []byte) (ii [MaxK]uint, vv [MaxK]byte) {
 	p := bloomBigPositions(m, data, buf)
 	for i := 0; i < len(p); i++ {
 		vv[i] = byte(1 << (p[i] & 0x7))
@@ -188,19 +198,23 @@ func EpochBloomLookup(bin BigBloom, topic bytesBacked) bool {
 }
 
 func (b BigBloom) Bits() (count int) {
-	for _, v := range b {
+	for _, v := range b.bits {
 		count += bits.OnesCount8(v)
 	}
 	return count
 }
 
 func (b BigBloom) Rate() float64 {
-	m := float64(len(b)) * 8
+	m := float64(b.M())
 	bits := b.Bits()
-	return math.Pow(float64(bits)/m, EpochBloomK)
+	return math.Pow(float64(bits)/m, float64(b.k))
 }
 
 func (b BigBloom) Size() uint {
-	m := float64(len(b)) * 8
-	return uint(-m * math.Log(1-float64(b.Bits())/m) / EpochBloomK)
+	m := float64(b.M())
+	return uint(-m * math.Log(1-float64(b.Bits())/m) / float64(b.k))
+}
+
+func (b BigBloom) M() int {
+	return len(b.bits) * 8
 }

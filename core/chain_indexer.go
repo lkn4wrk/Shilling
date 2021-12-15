@@ -343,7 +343,7 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 
 	// scratch buffers
 	item := make([]byte, 2+32+32)
-	buf := make([]byte, types.EpochBloomK*4)
+	buf := make([]byte, types.MaxK*4)
 
 	mustGetReceipts := func(blockNumber uint64) types.Receipts {
 		for {
