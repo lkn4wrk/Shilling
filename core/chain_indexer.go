@@ -368,13 +368,13 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 	const EpochRange = 256
 	const EpochRatio = 6
 
-	indexEpoch := func(blooms []types.BigBloom, first uint64, n uint64) int {
+	indexEpoch := func(blooms types.BigBlooms, first uint64, n uint64) int {
 		var count int
 		for blockNumber := first; blockNumber < first+n; blockNumber++ {
 			receipts := mustGetReceipts(blockNumber)
 			for _, receipt := range receipts {
 				for _, l := range receipt.Logs {
-					if err := l.AddToBlooms(blooms, item, buf); err != nil {
+					if err := blooms.Add(l, item, buf); err != nil {
 						log.Error("EPOCH: failed to add log to blooms", "err", err)
 						return -1
 					}

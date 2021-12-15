@@ -29,6 +29,8 @@ type BigBloom struct {
 	kPos int // 32 bytes offset for the first hash
 }
 
+type BigBlooms []BigBloom
+
 type BloomDocument struct {
 	First uint64 `bson:"_id"`
 	Range int    `bson:"range"`
@@ -77,9 +79,22 @@ func (b BigBloom) Add(d []byte) {
 	b.add(d, buf[:])
 }
 
+// add is internal version of Add, which takes a scratch buffer for reuse (needs to be at least 4*k bytes)
+func (b BigBloom) add(d []byte, buf []byte) {
+	p := hashPositions(d, buf)
+	b.addPositions(p)
+}
+
+func (bs BigBlooms) add(d []byte, buf []byte) {
+	p := hashPositions(d, buf)
+	for _, b := range bs {
+		b.addPositions(p)
+	}
+}
+
 // require len(item) >= 1+32+1+32
 // require len(buf) >= 4*k
-func (log *Log) AddToBlooms(bs []BigBloom, item []byte, buf []byte) error {
+func (bs BigBlooms) Add(log *Log, item []byte, buf []byte) error {
 	if log.Removed {
 		return nil // ignore removed log
 	}
@@ -96,36 +111,39 @@ func (log *Log) AddToBlooms(bs []BigBloom, item []byte, buf []byte) error {
 
 	// n + topic[0]
 	copy(item[1:], log.Topics[0].Bytes())
-	// TODO: optimize this to hash only once
-	for _, b := range bs {
-		b.add(item[:1+32], buf)
-	}
+
+	// TODO: uncomment this to index a single log topics[0]
+	// bs.add(item[:1+32], buf)
 
 	for i := byte(1); i < n; i++ {
 		// n + topic[0] + i + topic[i]
 		item[33] = i
 		copy(item[34:], log.Topics[i].Bytes())
-		// TODO: optimize this to hash only once
-		for _, b := range bs {
-			b.add(item[:1+32+1+32], buf)
-		}
+		bs.add(item[:1+32+1+32], buf)
 	}
+
 	// n + topic[0] + address
 	copy(item[33:], log.Address.Bytes())
-	// TODO: optimize this to hash only once
-	for _, b := range bs {
-		b.add(item[:1+32+20], buf)
-	}
+	bs.add(item[:1+32+20], buf)
+
 	return nil
 }
 
-// add is internal version of Add, which takes a scratch buffer for reuse (needs to be at least 4*k bytes)
-func (b BigBloom) add(d []byte, buf []byte) {
-	m := uint32(b.M())
-	ii, vv := bloomBigValues(m, d, buf)
+func (b BigBloom) addPositions(p [MaxK]uint32) {
+	ii, vv := hashBitPositions(b.M(), p)
 	for i := b.kPos; i < b.kPos+b.k; i++ {
 		b.bits[ii[i]] |= vv[i]
 	}
+}
+
+func (b BigBloom) testPositions(p [MaxK]uint32) bool {
+	ii, vv := hashBitPositions(b.M(), p)
+	for i := b.kPos; i < b.kPos+b.k; i++ {
+		if vv[i] != vv[i]&b.bits[ii[i]] {
+			return false
+		}
+	}
+	return true
 }
 
 // Bytes returns the backing byte slice of the bloom
@@ -135,15 +153,9 @@ func (b BigBloom) Bytes() []byte {
 
 // Test checks if the given topic is present in the bloom filter
 func (b BigBloom) Test(topic []byte) bool {
-	m := uint32(b.M())
 	var buf [4 * MaxK]byte
-	ii, vv := bloomBigValues(m, topic, buf[:])
-	for i := b.kPos; i < b.kPos+b.k; i++ {
-		if vv[i] != vv[i]&b.bits[ii[i]] {
-			return false
-		}
-	}
-	return true
+	p := hashPositions(topic, buf[:])
+	return b.testPositions(p)
 }
 
 // EpochBloomBytes returns the bloom filter for the given data
@@ -153,24 +165,24 @@ func EpochBloomBytes(data []byte) []byte {
 	return b.Bytes()
 }
 
-func bloomBigPositions(m uint32, data []byte, hashbuf []byte) (p [MaxK]uint) {
+func hashPositions(data []byte, hashbuf []byte) (p [MaxK]uint32) {
 	sha := hasherPool.Get().(crypto.KeccakState)
 	sha.Reset()
 	sha.Write(data)
 	sha.Read(hashbuf)
 	hasherPool.Put(sha)
 	for i := 0; i < MaxK; i++ {
-		p[i] = uint(binary.BigEndian.Uint32(hashbuf[4*i:]) % m)
+		p[i] = binary.BigEndian.Uint32(hashbuf[4*i:])
 	}
 	return p
 }
 
-// bloomBigValues returns the bytes (index-value pairs) to set for the given data
-func bloomBigValues(m uint32, data []byte, buf []byte) (ii [MaxK]uint, vv [MaxK]byte) {
-	p := bloomBigPositions(m, data, buf)
+// hashBitPositions returns the bytes (index-value pairs) to set for the given data
+func hashBitPositions(m int, p [MaxK]uint32) (ii [MaxK]uint, vv [MaxK]byte) {
 	for i := 0; i < len(p); i++ {
-		vv[i] = byte(1 << (p[i] & 0x7))
-		ii[i] = p[i] >> 3
+		pi := p[i] % uint32(m)
+		vv[i] = byte(1 << (pi & 0x7))
+		ii[i] = uint(pi >> 3)
 	}
 	return ii, vv
 }
