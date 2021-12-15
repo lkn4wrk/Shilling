@@ -128,13 +128,6 @@ func (b BigBloom) add(d []byte, buf []byte) {
 	}
 }
 
-// Big converts b to a big integer.
-// Note: Converting a bloom filter to a big.Int and then calling GetBytes
-// does not return the same bytes, since big.Int will trim leading zeroes
-// func (b BigBloom) Big() *big.Int {
-// 	return new(big.Int).SetBytes(b.bits[:])
-// }
-
 // Bytes returns the backing byte slice of the bloom
 func (b BigBloom) Bytes() []byte {
 	return b.bits[:]
@@ -152,16 +145,6 @@ func (b BigBloom) Test(topic []byte) bool {
 	}
 	return true
 }
-
-// MarshalText encodes b as a hex string with 0x prefix.
-// func (b BigBloom) MarshalText() ([]byte, error) {
-// 	return hexutil.Bytes(b.bits[:]).MarshalText()
-// }
-
-// UnmarshalText b as a hex string with 0x prefix.
-// func (b BigBloom) UnmarshalText(input []byte) error {
-// 	return hexutil.UnmarshalFixedText("BigBloom", input, b[:])
-// }
 
 // EpochBloomBytes returns the bloom filter for the given data
 func EpochBloomBytes(data []byte) []byte {
