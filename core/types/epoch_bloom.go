@@ -83,7 +83,13 @@ func (log *Log) AddToBlooms(bs []EpochBloom, item []byte, buf []byte) error {
 	} else {
 		item[0] = 0
 	}
+
+	// n + topic[0]
 	copy(item[1:], log.Topics[0].Bytes())
+	// TODO: optimize this to hash only once
+	for _, b := range bs {
+		b.add(item[:1+32], buf)
+	}
 
 	for i := byte(1); i < n; i++ {
 		// n + topic[0] + i + topic[i]
