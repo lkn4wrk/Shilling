@@ -368,7 +368,7 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 	const EpochRange = 256
 	const EpochRatio = 6
 
-	indexEpoch := func(blooms []types.EpochBloom, first uint64, n uint64) int {
+	indexEpoch := func(blooms []types.BigBloom, first uint64, n uint64) int {
 		var count int
 		for blockNumber := first; blockNumber < first+n; blockNumber++ {
 			receipts := mustGetReceipts(blockNumber)
@@ -423,7 +423,7 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 
 		// verify the last doc here
 		epochBloom := types.NewBloom(doc.Range, EpochRatio)
-		blooms := []types.EpochBloom{epochBloom}
+		blooms := []types.BigBloom{epochBloom}
 
 		log.Info("EPOCH: start verify the last epoch", "from", doc.First, "range", doc.Range)
 
@@ -468,7 +468,7 @@ func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
 		}
 
 		epochBloom := types.NewBloom(EpochRange, EpochRatio)
-		blooms := []types.EpochBloom{epochBloom}
+		blooms := []types.BigBloom{epochBloom}
 		first := epoch * EpochRange
 
 		log.Info("EPOCH: start indexing", "from", first, "range", EpochRange)
