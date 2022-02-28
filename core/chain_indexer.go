@@ -17,6 +17,7 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -30,6 +31,16 @@ import (
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/params"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
+)
+
+const (
+	mongoURI    = "mongodb://127.0.0.1:27017"
+	mongoName   = "bloom"
+	mongoPrefix = "bloom"
 )
 
 // ChainIndexerBackend defines the methods needed to process chain segments in
@@ -58,6 +69,14 @@ type ChainIndexerChain interface {
 
 	// SubscribeChainHeadEvent subscribes to new head header notifications.
 	SubscribeChainHeadEvent(ch chan<- ChainHeadEvent) event.Subscription
+}
+
+type ChainIndexerFullChain interface {
+	ChainIndexerChain
+
+	GetHeaderByNumber(number uint64) *types.Header
+	GetReceiptsByHash(hash common.Hash) types.Receipts
+	Config() *params.ChainConfig
 }
 
 // ChainIndexer does a post-processing job for equally sized sections of the
@@ -150,6 +169,7 @@ func (c *ChainIndexer) Start(chain ChainIndexerChain) {
 	sub := chain.SubscribeChainHeadEvent(events)
 
 	go c.eventLoop(chain.CurrentHeader(), events, sub)
+	go c.epochIndexLoop(chain)
 }
 
 // Close tears down all goroutines belonging to the indexer and returns any error
@@ -296,6 +316,190 @@ func (c *ChainIndexer) newHead(head uint64, reorg bool) {
 			default:
 			}
 		}
+	}
+}
+
+func (c *ChainIndexer) epochIndexLoop(chain ChainIndexerChain) {
+	blockchain, ok := chain.(ChainIndexerFullChain)
+	if !ok {
+		log.Error("EPOCH: disabled for lightchain")
+		return
+	}
+
+	log.Info("EPOCH: start indexing sequence")
+
+	client, err := mongo.Connect(context.TODO(), options.Client().ApplyURI(mongoURI))
+	if err != nil {
+		log.Error("EPOCH: MongoDB connect", err)
+		return
+	}
+	defer func() {
+		log.Info("EPOCH: shutting down")
+		if err = client.Disconnect(context.TODO()); err != nil {
+			log.Error("EPOCH: MongoDB disconnect", err)
+		}
+	}()
+	collection := client.Database(mongoName).Collection(mongoPrefix + blockchain.Config().ChainID.Text(16))
+
+	// scratch buffers
+	item := make([]byte, 2+32+32)
+	buf := make([]byte, types.MaxK*4)
+
+	mustGetReceipts := func(blockNumber uint64) types.Receipts {
+		for {
+			header := blockchain.GetHeaderByNumber(blockNumber)
+			if header == nil {
+				log.Error("EPOCH: missing header", "number", blockNumber)
+				time.Sleep(time.Minute)
+				continue
+			}
+
+			receipts := blockchain.GetReceiptsByHash(header.Hash())
+			if receipts == nil {
+				log.Error("EPOCH: missing block receipts", "number", blockNumber)
+				time.Sleep(time.Minute)
+				continue
+			}
+
+			return receipts
+		}
+	}
+
+	const EpochRange = 256
+	const EpochRatio = 6
+
+	indexEpoch := func(blooms types.BigBlooms, first uint64, n uint64) int {
+		var count int
+		for blockNumber := first; blockNumber < first+n; blockNumber++ {
+			receipts := mustGetReceipts(blockNumber)
+			for _, receipt := range receipts {
+				for _, l := range receipt.Logs {
+					if err := blooms.Add(l, item, buf); err != nil {
+						log.Error("EPOCH: failed to add log to blooms", "err", err)
+						return -1
+					}
+					count++
+				}
+			}
+		}
+		return count
+	}
+
+	lastDocument := func(bitsProjection int) (*types.BloomDocument, error) {
+		projection := bson.M{
+			"_id":   1,
+			"range": 1,
+			"bits":  bitsProjection,
+		}
+		doc := types.BloomDocument{}
+		err := collection.FindOne(
+			context.TODO(),
+			bson.M{},
+			options.FindOne().SetProjection(projection).SetSort(bson.M{"_id": -1}),
+		).Decode(&doc)
+		if err == nil {
+			return &doc, nil
+		}
+		if err == mongo.ErrNoDocuments {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	doc, err := lastDocument(1)
+	if err != nil {
+		log.Error("EPOCH: error querying last document", "err", err)
+		return
+	}
+
+	var epoch uint64
+
+	if doc != nil {
+		// verify the last _id
+		if doc.Range != EpochRange || doc.First%EpochRange != 0 {
+			log.Error("EPOCH: unexpected last document _id and/or range", "first", doc.First, "range", doc.Range)
+			return
+		}
+
+		// verify the last doc here
+		epochBloom := types.NewBloom(doc.Range, EpochRatio)
+		blooms := []types.BigBloom{epochBloom}
+
+		log.Info("EPOCH: start verify the last epoch", "from", doc.First, "range", doc.Range)
+
+		count := indexEpoch(blooms, doc.First, uint64(doc.Range))
+		if count < 0 {
+			log.Error("EPOCH: indexing last epoch failed")
+			return
+		}
+
+		if !bytes.Equal(doc.Bits, epochBloom.Bytes()) {
+			log.Error("EPOCH: invalid last epoch bloom bits")
+			return
+		}
+
+		// advance to the next epoch
+		epoch = doc.First/EpochRange + 1
+	}
+
+	log.Info("EPOCH: start catching up")
+	for {
+		lastBlock := (epoch+1)*EpochRange - 1
+		head := blockchain.CurrentHeader().Number.Uint64()
+		if lastBlock+c.confirmsReq > head {
+			blocksToWait := lastBlock + c.confirmsReq - head
+			log.Info("EPOCH: waiting for complete epoch", "blocks", blocksToWait)
+			select {
+			case errc := <-c.quit:
+				// Chain indexer terminating, report no failure and abort
+				errc <- nil
+				return
+			case <-time.After(time.Minute):
+				continue
+			}
+		} else {
+			select {
+			case errc := <-c.quit:
+				// Chain indexer terminating, report no failure and abort
+				errc <- nil
+				return
+			default:
+			}
+		}
+
+		epochBloom := types.NewBloom(EpochRange, EpochRatio)
+		blooms := []types.BigBloom{epochBloom}
+		first := epoch * EpochRange
+
+		log.Info("EPOCH: start indexing", "from", first, "range", EpochRange)
+
+		count := indexEpoch(blooms, first, EpochRange)
+		if count < 0 {
+			log.Error("EPOCH: indexing epoch failed")
+			return
+		}
+		epoch++
+
+		log.Info("EPOCH: finished indexing", "bits", epochBloom.Bits(), "rate%", epochBloom.Rate()*100, "size", epochBloom.Size(), "count", count)
+
+		// don't wait for db write
+		go func() {
+			for {
+				res, err := collection.InsertOne(context.TODO(),
+					bson.M{
+						"_id":   first,
+						"range": EpochRange,
+						"bits":  epochBloom.Bytes(),
+					},
+				)
+				if err == nil {
+					log.Info("EPOCH: successfully written", "res", res)
+					return
+				}
+
+				log.Error("EPOCH: failed to insert, retrying..", "err", err)
+			}
+		}()
 	}
 }
 
